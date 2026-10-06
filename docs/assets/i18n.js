@@ -150,7 +150,8 @@ export function shortDate(iso) {
 }
 
 export function duration(sec) {
-  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  const total = Math.round(sec / 60);
+  const h = Math.floor(total / 60), m = total % 60;
   if (!h) return `${m} ${t("min")}`;
   return `${h} ${t("h")} ${String(m).padStart(2, "0")} ${t("min")}`;
 }
