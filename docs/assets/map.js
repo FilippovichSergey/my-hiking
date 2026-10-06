@@ -30,7 +30,9 @@ const DEM = {
   attribution: '<a href="https://registry.opendata.aws/terrain-tiles/">Terrain Tiles</a>',
 };
 const EMPTY = { type: "FeatureCollection", features: [] };
-const CLUSTER_COLOR = "#c2410c";
+// Фіялетавы не зліваецца з колерамі тапакарты (зеляніна, карычневыя/аранжавыя горы, блакітная вада).
+const HIKE_COLOR = "#7c3aed";
+const CLUSTER_COLOR = "#5b21b6";
 
 function fitPadding() {
   return innerWidth > 760 ? { top: 50, bottom: 50, left: 50, right: 150 } : 36;
@@ -96,7 +98,7 @@ export function createMap(el, { onSelect }) {
           id: "lines", type: "line", source: "lines", minzoom: 8,
           layout: { "line-join": "round", "line-cap": "round" },
           paint: {
-            "line-color": "#eb6834",
+            "line-color": HIKE_COLOR,
             "line-width": ["case", ["boolean", ["feature-state", "hover"], false], 4.5, 2.5],
           },
         },
@@ -127,7 +129,7 @@ export function createMap(el, { onSelect }) {
         {
           id: "points", type: "circle", source: "hikes", filter: ["!", ["has", "point_count"]],
           paint: {
-            "circle-color": ["case", ["get", "selected"], "#2a78d6", "#eb6834"],
+            "circle-color": ["case", ["get", "selected"], "#2a78d6", HIKE_COLOR],
             "circle-radius": ["case", ["get", "selected"], 8, 6.5],
             "circle-stroke-color": "#ffffff",
             "circle-stroke-width": 2,
