@@ -132,7 +132,7 @@ def render_yaml(h: dict, today: str) -> str:
         f"  en: {yaml_str(h['region']['en'])}",
         "difficulty:                 # easy | medium | hard | expert",
         f"photos_folder: {yaml_str(h['folder'] or '')}   # фота з падтэчкі «Сайт» або «для сайту»",
-        "cover:                      # імя файла вокладкі; калі пуста, першае фота",
+        "cover:                      # імя файла вокладкі (можна без пашырэння); калі пуста, першае фота",
     ]
     if h["tours"]:
         lines.append("komoot:                     # туры Komoot; туры аднаго дня аб'ядноўваюцца ў адзін дзень")

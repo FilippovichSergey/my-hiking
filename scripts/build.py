@@ -187,7 +187,7 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
     for i, (_, key, m) in enumerate(entries):
         photos.append({"src": f"photos/{slug}/{m['name']}.webp", "thumb": f"photos/{slug}/{m['name']}-t.webp",
                        "w": m["w"], "h": m["h"]})
-        if cover and key.lower() == cover.lower():
+        if cover and str(cover).lower() in (key.lower(), Path(key).stem.lower()):
             cover_idx = i
         gps = gps or m.get("gps")
     return photos, cover_idx, gps
