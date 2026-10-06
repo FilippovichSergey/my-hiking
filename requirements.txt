@@ -1,0 +1,4 @@
+pillow>=12
+pyyaml>=6
+requests>=2.32
+yt-dlp>=2026.8.19

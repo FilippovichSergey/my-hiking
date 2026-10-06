@@ -1,0 +1,25 @@
+# Чарнавік створаны аўтаматычна 2026-10-06: праверце і дапоўніце.
+date: 2024-08-03
+title:
+  be: "Казбегі"
+  en: "Kazbegi"
+region:
+  be: "Мцхета-Мтыянеці"
+  en: "Mtskheta-Mtianeti"
+difficulty:                 # easy | medium | hard | expert
+photos_folder: "20240803-11_Казбегі"   # фота з падтэчкі «Сайт» або «для сайту»
+cover:                      # імя файла вокладкі; калі пуста, першае фота
+komoot:                     # туры Komoot, па адным на кожны дзень
+  - 1771446224   # 2024-08-05  Hiking Tour
+  - 1771450029   # 2024-08-06  Hiking Tour
+  - 1771451048   # 2024-08-08  Hiking Tour
+  - 1771738570   # 2024-08-08  Hiking Tour
+  - 1777072838   # 2024-08-10  Hiking Tour
+youtube:
+  - KFmaGEbzmVQ   # Паход у Казбегі ў жніўні 2024
+  - pMXa2MzV9hM   # Разважанні пра паход у Казбегі ў жніўні 2024
+impressions:
+  be: |
+    
+  en: |
+    

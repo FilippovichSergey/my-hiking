@@ -1,0 +1,19 @@
+# Чарнавік створаны аўтаматычна 2026-10-06: праверце і дапоўніце.
+date: 2026-02-15
+title:
+  be: "Альпінізм ля Капніставі"
+  en: "Climbing near Kapnistavi"
+region:
+  be: "Аджарыя"
+  en: "Adjara"
+difficulty:                 # easy | medium | hard | expert
+photos_folder: "20260215_альпінізм"   # фота з падтэчкі «Сайт» або «для сайту»
+cover:                      # імя файла вокладкі; калі пуста, першае фота
+komoot:                     # туры Komoot, па адным на кожны дзень
+  - 3333374625   # 2026-02-15  Hike
+youtube: []
+impressions:
+  be: |
+    
+  en: |
+    

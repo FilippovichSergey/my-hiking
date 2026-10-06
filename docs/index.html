@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="be">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    {
+      try {
+        const scheme = localStorage.getItem("color-scheme");
+        if (scheme === "light" || scheme === "dark") {
+          document.querySelector('meta[name="color-scheme"]').content = scheme;
+          document.documentElement.classList.add("theme-" + scheme);
+        }
+      } catch {}
+    }
+  </script>
+  <title>Мае паходы</title>
+  <meta name="description" content="Карта маіх хайкінгаў: трэкі, фота, відэа і ўражанні.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M2 27 12 9l6 10 4-6 8 14z' fill='%23eb6834'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/photoswipe@5.4.4/dist/photoswipe.css">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.js" defer></script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <aside class="panel" id="panel" aria-label="Паходы">
+      <header class="panel-head">
+        <a class="brand" href="#" id="brand">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2 27 12 9l6 10 4-6 8 14z"/></svg>
+          <span id="site-title">Мае паходы</span>
+        </a>
+        <div class="head-actions">
+          <div class="seg" role="group" aria-label="Language / Мова">
+            <button type="button" data-lang="be">BE</button>
+            <button type="button" data-lang="en">EN</button>
+          </div>
+          <button type="button" class="icon-btn" id="theme-toggle">
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="i-moon"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="i-sun"><circle cx="12" cy="12" r="4.5"/><path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3M4.6 4.6l2.1 2.1M17.3 17.3l2.1 2.1M4.6 19.4l2.1-2.1M17.3 6.7l2.1-2.1"/></svg>
+          </button>
+        </div>
+      </header>
+      <div class="panel-body" id="panel-body">
+        <p class="loading">…</p>
+      </div>
+    </aside>
+    <main class="map-wrap">
+      <div id="map" role="region" aria-label="Карта"></div>
+    </main>
+  </div>
+</body>
+</html>

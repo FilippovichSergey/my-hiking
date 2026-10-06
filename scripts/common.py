@@ -1,0 +1,114 @@
+"""Агульныя шляхі, налады і дапаможныя функцыі для ўсіх скрыптоў."""
+from __future__ import annotations
+
+import json
+import re
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+CACHE = ROOT / "cache"
+CONTENT = ROOT / "content" / "hikes"
+DOCS = ROOT / "docs"
+
+
+def load_config() -> dict:
+    with open(ROOT / "config.yaml", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def site_photos_dir(folder: Path, cfg: dict) -> Path | None:
+    """Падтэчка з фота для сайта ўнутры тэчкі паходу (без уліку рэгістра)."""
+    if not folder.is_dir():
+        return None
+    subdirs = {p.name.lower(): p for p in folder.iterdir() if p.is_dir()}
+    for name in cfg.get("site_photos_subfolders") or ["Сайт"]:
+        if name.lower() in subdirs:
+            return subdirs[name.lower()]
+    return None
+
+
+def read_json(path: Path, default=None):
+    if not path.exists():
+        return default
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path: Path, data, compact: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        if compact:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        else:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+
+
+def load_yaml(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+# --- Дата тура ---------------------------------------------------------------
+
+def tour_local_datetime(iso: str, default_offset_h: float) -> datetime:
+    """Komoot аддае дату ў ISO; калі пояс UTC, пераводзім у лакальны час паходу."""
+    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    if dt.tzinfo is None or dt.utcoffset() == timedelta(0):
+        dt = dt.replace(tzinfo=dt.tzinfo or timezone.utc)
+        dt = dt.astimezone(timezone(timedelta(hours=default_offset_h)))
+    return dt
+
+
+# --- Тэчкі з фота ------------------------------------------------------------
+
+FOLDER_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})(?:-(\d{2})(?:(\d{2}))?)?[ _]*(.*)$")
+
+
+def parse_folder(name: str):
+    """'20230902-04_Казбегі' -> (date(2023,9,2), date(2023,9,4), 'Казбегі').
+
+    Таксама разумее '20231105-0601_...' (канец у іншым месяцы: ДД або ММДД).
+    Вяртае None, калі назва не пачынаецца з поўнай даты.
+    """
+    m = FOLDER_RE.match(name)
+    if not m:
+        return None
+    y, mo, d, end_a, end_b, title = m.groups()
+    try:
+        start = date(int(y), int(mo), int(d))
+        if end_a and end_b:  # ММДД
+            end = date(int(y), int(end_a), int(end_b))
+        elif end_a:
+            end = date(int(y), int(mo), int(end_a))
+        else:
+            end = start
+    except ValueError:
+        return None
+    if end < start:
+        end = start
+    return start, end, title.replace("_", " ").strip()
+
+
+# --- Транслітарацыя для адрасоў (slug) ------------------------------------------
+
+_TR = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "ґ": "g", "д": "d", "е": "e", "ё": "yo",
+    "ж": "zh", "з": "z", "і": "i", "и": "i", "й": "j", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ў": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y",
+    "ь": "", "э": "e", "ю": "yu", "я": "ya", "'": "", "’": "", "ʼ": "",
+}
+
+
+def slugify(text: str) -> str:
+    out = "".join(_TR.get(ch, ch) for ch in text.lower())
+    out = re.sub(r"[^a-z0-9]+", "-", out).strip("-")
+    return out or "hike"
+
+
+def hike_slug(start: date, title: str) -> str:
+    return f"{start.isoformat()}-{slugify(title)}" if title else start.isoformat()
