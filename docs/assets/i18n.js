@@ -43,7 +43,7 @@ const STRINGS = {
     m: "м",
     h: "г",
     min: "хв",
-    layers: { topo: "Тапа", sat: "Спадарожнік", plain: "Схема" },
+    layers: { topo: "Тапакарта", sat: "Спадарожнік", plain: "Схема" },
     terrain3d: "3D-рэльеф",
     difficulty: { easy: "Лёгка", medium: "Сярэдне", hard: "Цяжка", expert: "Вельмі цяжка" },
     altAt: (alt, km) => [`${alt} м`, `${km} км`],
