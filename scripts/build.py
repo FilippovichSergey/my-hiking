@@ -121,7 +121,10 @@ def _open_image(src: Path, tmp_dir: Path) -> Image.Image:
     tmp_dir.mkdir(parents=True, exist_ok=True)
     tmp = tmp_dir / (src.stem + ".tif")
     subprocess.run(["magick", str(src), "-auto-orient", str(tmp)], check=True, capture_output=True)
-    return Image.open(tmp)
+    img = Image.open(tmp)
+    img.load()  # чытаем у памяць, каб адразу выдаліць вялікі часовы TIFF
+    tmp.unlink()
+    return img
 
 
 def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, force: bool):
