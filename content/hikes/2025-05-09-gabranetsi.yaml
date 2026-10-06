@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20250509_Габранэці"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: _MG_0724
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 2228354802   # 2025-05-09  Hike
 youtube:                    # падабрана аўтаматычна, праверце

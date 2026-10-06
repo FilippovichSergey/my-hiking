@@ -8,7 +8,7 @@ region:
   en: "Guria"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20250712_Бахмаро"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: _MG_1161
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 2398568592   # 2025-07-12  Hike
 youtube:                    # падабрана аўтаматычна, праверце

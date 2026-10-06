@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20251018_Шуахеві"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: IMG_0441
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 2641886954   # 2025-10-18  Hike
 youtube:

@@ -7,8 +7,8 @@ region:
   be: "Аджарыя"
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
-photos_folder: "20240721_Толя"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+photos_folder: "20240721"   # фота з падтэчкі «Сайт» або «для сайту»
+cover: IMG_0795
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1726258903   # 2024-07-21  Hiking Tour
 youtube: []

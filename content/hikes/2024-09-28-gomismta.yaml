@@ -8,7 +8,7 @@ region:
   en: "Guria"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20240928-29_ГомісМта"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: IMG_2149
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1887573521   # 2024-09-28  Hike
   - 1887576640   # 2024-09-28  Hike

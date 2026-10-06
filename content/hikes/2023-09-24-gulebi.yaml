@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20230924_Гулебі"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: DJI_0044
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1324454461   # 2023-09-24  Hiking Tour
 youtube: []

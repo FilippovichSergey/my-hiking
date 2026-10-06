@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20240302_Мцірала"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: "photo_2024-03-03_12-43-39 (2)"
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1455898309   # 2024-03-02  Hiking Tour
 youtube:                    # падабрана аўтаматычна, праверце

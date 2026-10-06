@@ -8,7 +8,7 @@ region:
   en: "Samegrelo-Zemo Svaneti"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20250718-20_Месціа"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: _MG_1235
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 2418878436   # 2025-07-19  Hike
 youtube: []

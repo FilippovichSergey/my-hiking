@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20250726-27_Гулебі"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: _MG_1290
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 2437375068   # 2025-07-26  Hike
   - 2441835910   # 2025-07-27  Hike

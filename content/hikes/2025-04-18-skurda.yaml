@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20250418_Скурда"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: IMG_2059
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 2169880670   # 2025-04-18  Hike
 youtube:                    # падабрана аўтаматычна, праверце

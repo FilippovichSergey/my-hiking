@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20240210_Мелісі_Архангел"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: DJI_0227
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1436068919   # 2024-02-10  Hiking Tour
 youtube:                    # падабрана аўтаматычна, праверце

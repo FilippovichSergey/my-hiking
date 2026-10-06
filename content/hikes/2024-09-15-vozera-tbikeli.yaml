@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20240915-16_возера_Тбікелі"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: DJI_0531
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1862702778   # 2024-09-14  Hike
   - 1862504941   # 2024-09-15  Hike

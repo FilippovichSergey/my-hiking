@@ -8,7 +8,7 @@ region:
   en: "Mtskheta-Mtianeti"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20240803-11_Казбегі"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: IMG_0849
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1771446224   # 2024-08-05  Hiking Tour
   - 1771450029   # 2024-08-06  Hiking Tour

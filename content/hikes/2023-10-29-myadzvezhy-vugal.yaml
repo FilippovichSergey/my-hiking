@@ -8,7 +8,7 @@ region:
   en: "Adjara"
 difficulty:                 # easy | medium | hard | expert
 photos_folder: "20231029_Мядзвежы_вугал"   # фота з падтэчкі «Сайт» або «для сайту»
-cover:                      # імя файла вокладкі; калі пуста, першае фота
+cover: IMG_20231029_162729
 komoot:                     # туры Komoot, па адным на кожны дзень
   - 1362342205   # 2023-10-29  Hiking Tour
 youtube: []
