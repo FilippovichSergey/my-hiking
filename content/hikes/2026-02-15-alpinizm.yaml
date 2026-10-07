@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: easy
 photos_folder: "20260215_альпінізм"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: IMG_5176
 komoot:                     # туры Komoot, па адным на кожны дзень

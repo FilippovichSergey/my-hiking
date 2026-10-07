@@ -6,7 +6,7 @@ title:
 region:
   be: "Гурыя"
   en: "Guria"
-difficulty:                 # easy | medium | hard | expert
+difficulty: hard
 photos_folder: "20260712_Бахмаро"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: IMG_6262
 komoot:                     # туры Komoot, па адным на кожны дзень

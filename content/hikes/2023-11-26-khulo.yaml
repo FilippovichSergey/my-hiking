@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: hard
 photos_folder: "20231126_Хуло"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: "photo_2023-11-26_21-46-19 (2)"
 komoot:                     # туры Komoot, па адным на кожны дзень

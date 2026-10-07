@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: expert
 photos_folder: "20240915-16_возера_Тбікелі"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: DJI_0531
 komoot:                     # туры Komoot, па адным на кожны дзень

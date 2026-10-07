@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: easy
 photos_folder: "20250509_Габранэці"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: _MG_0724
 komoot:                     # туры Komoot, па адным на кожны дзень

@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: easy
 photos_folder: "20241207_Архангел"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: _MG_9443
 komoot:                     # туры Komoot, па адным на кожны дзень

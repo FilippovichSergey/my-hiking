@@ -6,7 +6,7 @@ title:
 region:
   be: "Гурыя"
   en: "Guria"
-difficulty:                 # easy | medium | hard | expert
+difficulty: medium
 photos_folder: "20240928-29_ГомісМта"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: IMG_2149
 komoot:                     # туры Komoot, па адным на кожны дзень

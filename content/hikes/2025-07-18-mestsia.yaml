@@ -6,7 +6,7 @@ title:
 region:
   be: "Самегрэла-Зема-Сванеці"
   en: "Samegrelo-Zemo Svaneti"
-difficulty:                 # easy | medium | hard | expert
+difficulty: easy
 photos_folder: "20250718-20_Месціа"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: _MG_1235
 komoot:                     # туры Komoot, па адным на кожны дзень

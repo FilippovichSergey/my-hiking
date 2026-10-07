@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: easy
 photos_folder: "20240623_Гулебі"   # фота з падтэчкі «Сайт» або «для сайту»
 cover:                      # імя файла вокладкі; калі пуста, першае фота
 komoot:                     # туры Komoot, па адным на кожны дзень

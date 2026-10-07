@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: hard
 photos_folder: "20251129_Кабан"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: IMG_3519
 komoot:                     # туры Komoot, па адным на кожны дзень

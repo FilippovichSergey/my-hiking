@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: expert
 photos_folder: "20231029_Мядзвежы_вугал"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: IMG_20231029_162729
 komoot:                     # туры Komoot, па адным на кожны дзень

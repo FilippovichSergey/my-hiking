@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: medium
 photos_folder: "20260704_Мцірала"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: IMG_6250
 komoot:                     # туры Komoot, па адным на кожны дзень

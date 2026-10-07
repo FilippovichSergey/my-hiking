@@ -6,7 +6,7 @@ title:
 region:
   be: "Аджарыя"
   en: "Adjara"
-difficulty:                 # easy | medium | hard | expert
+difficulty: easy
 photos_folder: "20230625_крэпасць_Хіхані"   # фота з падтэчкі «Сайт» або «для сайту»
 cover: IMG_20230625_135739
 komoot:                     # туры Komoot, па адным на кожны дзень
