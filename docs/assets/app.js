@@ -282,11 +282,6 @@ async function renderDetail(hike, fit = true) {
     track ? [h("h2", null, t("profile")), h("div", { class: "profile", id: "profile" })] : null,
     hike.track && !track ? h("p", { class: "notice" }, t("trackError")) : null,
 
-    h("h2", null, t("impressions")),
-    impressions(hike),
-
-    hike.videos.length ? [h("h2", null, t("videos")), h("div", { class: "videos" }, hike.videos.map(videoEmbed))] : null,
-
     hike.photos.length ? [
       h("h2", null, `${t("photos")} · ${hike.photos.length}`),
       h("div", { class: "gallery" }, hike.photos.map((p, i) => h("a", {
@@ -294,6 +289,11 @@ async function renderDetail(hike, fit = true) {
         onclick: (e) => { e.preventDefault(); openGallery(hike, i); },
       }, h("img", { src: p.thumb, alt: `${pick(hike.title)} · ${i + 1}`, loading: "lazy", width: 160, height: 160 })))),
     ] : null,
+
+    hike.videos.length ? [h("h2", null, t("videos")), h("div", { class: "videos" }, hike.videos.map(videoEmbed))] : null,
+
+    h("h2", null, t("impressions")),
+    impressions(hike),
 
     hike.days.some((d) => d.komoot.length) ? [
       h("h2", null, t("links")),
