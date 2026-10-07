@@ -285,7 +285,9 @@ export function createMap(el, { onSelect }) {
       }));
       map.getSource("selected").setData({ type: "FeatureCollection", features });
       if (!fit) return;
-      const coords = (day != null ? [track.days[day]] : track?.days || []).flatMap((d) => d.segs.flat());
+      const days = track?.days || [];
+      const shown = day != null ? (days[day] ? [days[day]] : []) : days; // трэк мог не загрузіцца
+      const coords = shown.flatMap((d) => d.segs.flat());
       if (coords.length) {
         const b = new maplibregl.LngLatBounds([coords[0][0], coords[0][1]], [coords[0][0], coords[0][1]]);
         coords.forEach((c) => b.extend([c[0], c[1]]));

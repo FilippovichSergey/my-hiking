@@ -4,7 +4,7 @@
 
 Крыніцы:
   * хайкінг-туры з cache/komoot (hike komoot) — туры аднаго паходу групуюцца
-    па тэчцы з фота, у якую трапляе іх дата (кожны тур = адзін дзень);
+    па тэчцы з фота, у якую трапляе іх дата (туры аднаго дня ў build аб'ядноўваюцца);
   * тэчкі з падтэчкай «Сайт» / «для сайту», для якіх няма тура (паход без трэку);
   * відэа з cache/youtube.json (hike youtube) — падбіраюцца па даце ў назве
     або па супадзенні назваў месцаў.
@@ -160,6 +160,19 @@ def render_yaml(h: dict, today: str) -> str:
     return "\n".join(lines)
 
 
+def create_draft(slug: str, text: str) -> Path:
+    """Стварае content/hikes/<slug>[-N].yaml, ніколі не перазапісваючы існуючы файл."""
+    for n in range(1, 1000):
+        path = CONTENT / (f"{slug}.yaml" if n == 1 else f"{slug}-{n}.yaml")
+        try:
+            with open(path, "x", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+            return path
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"не знайшлося вольнага імя для {slug}")
+
+
 def main(argv=None) -> None:
     cfg = load_config()
     photos_root = Path(cfg["photos_root"])
@@ -174,6 +187,8 @@ def main(argv=None) -> None:
     ignored_folders = set(ignore.get("folders") or [])
     used_videos = {v for h in existing.values() for v in (h.get("youtube") or [])}
 
+    if not photos_root.is_dir():
+        raise SystemExit(f"Тэчка з фота недаступная: {photos_root} (дыск падключаны? шлях у config.yaml)")
     folders = list_folders(photos_root, cfg)
     tours = [t for t in read_json(CACHE / "komoot" / "tours.json", []) if t["sport"] in sports]
 
@@ -187,6 +202,9 @@ def main(argv=None) -> None:
             print(f"  ! тур {t['id']} «{t['name']}» без даты (імпартаваны GPX?) — прапушчаны")
             continue
         folder = pick_folder(t["local"].date(), folders)
+        if folder and folder["name"] in ignored_folders:
+            print(f"  · тур {t['id']} ({t['local'].date()}, {t['name']}) з выключанай тэчкі {folder['name']} — прапушчаны")
+            continue
         if folder and folder["name"] in folder_owner:
             print(f"  ! тур {t['id']} ({t['local'].date()}, {t['name']}) адносіцца да тэчкі {folder['name']}, "
                   f"якая ўжо ёсць у {folder_owner[folder['name']]}.yaml — дадайце яго ў komoot: уручную")
@@ -247,12 +265,7 @@ def main(argv=None) -> None:
             g["location"] = photo_location(photos_root / g["folder"], cfg)
             if g["location"]:
                 g["region"] = region_for_point(*g["location"])
-        slug = hike_slug(g["start"], g["title"])
-        path = CONTENT / f"{slug}.yaml"
-        if path.exists():
-            slug = f"{slug}-{g['tours'][0]['id']}" if g["tours"] else slug + "-2"
-            path = CONTENT / f"{slug}.yaml"
-        path.write_text(render_yaml(g, today), encoding="utf-8", newline="\n")
+        path = create_draft(hike_slug(g["start"], g["title"]), render_yaml(g, today))
         print(f"  + {path.name}  (дзён з трэкам: {len(g['tours'])}, відэа: {len(g['videos'])})")
     print(f"Створана чарнавікоў: {len(groups)} → content/hikes/")
 

@@ -95,12 +95,15 @@ function route() {
 
 // --- Фільтры і агульная статыстыка ------------------------------------------
 
+/** Ключ рэгіёна не залежыць ад мовы інтэрфейсу, каб фільтр перажываў пераключэнне BE/EN. */
+function regionKey(hk) { return hk.region.en || hk.region.be || ""; }
+
 function filtered() {
   const { q, year, region, difficulty } = state.filters;
   const needle = q.trim().toLowerCase();
   return state.hikes.filter((hk) =>
     (!year || hk.date.startsWith(year)) &&
-    (!region || pick(hk.region) === region) &&
+    (!region || regionKey(hk) === region) &&
     (!difficulty || hk.difficulty === difficulty) &&
     (!needle || [hk.title.be, hk.title.en, hk.region.be, hk.region.en].some((s) => s?.toLowerCase().includes(needle))));
 }
@@ -146,6 +149,7 @@ function select(options, value, allLabel, onchange, label) {
 // --- Спіс паходаў -----------------------------------------------------------
 
 function renderList() {
+  ++renderToken; // незавершаны renderDetail() пасля await убачыць, што ён ужо неактуальны
   profile?.destroy();
   profile = null;
   const wasSelected = !!state.selected;
@@ -156,7 +160,8 @@ function renderList() {
 
   const list = filtered();
   const years = [...new Set(state.hikes.map((hk) => hk.date.slice(0, 4)))].sort().reverse();
-  const regions = [...new Set(state.hikes.map((hk) => pick(hk.region)).filter(Boolean))].sort((a, b) => a.localeCompare(b, lang));
+  const regions = [...new Map(state.hikes.filter(regionKey).map((hk) => [regionKey(hk), pick(hk.region)]))]
+    .sort((a, b) => a[1].localeCompare(b[1], lang));
   const setFilter = (key, value) => { state.filters[key] = value; renderList(); };
 
   const search = h("input", {
@@ -179,7 +184,7 @@ function renderList() {
         chip(t("allYears"), !state.filters.year, () => setFilter("year", "")),
         years.map((y) => chip(y, state.filters.year === y, () => setFilter("year", state.filters.year === y ? "" : y)))),
       h("div", { class: "filter-row" },
-        select(regions.map((r) => [r, r]), state.filters.region, t("allRegions"), (v) => setFilter("region", v), t("allRegions")),
+        select(regions, state.filters.region, t("allRegions"), (v) => setFilter("region", v), t("allRegions")),
         select(Object.keys(DIFF_LEVEL).map((d) => [d, t("difficulty")[d]]), state.filters.difficulty, t("allDifficulty"),
           (v) => setFilter("difficulty", v), t("allDifficulty")))),
     h("p", { class: "result-count", "aria-live": "polite" }, t("found", list.length)),
@@ -275,6 +280,7 @@ async function renderDetail(hike, fit = true) {
     ) : null,
 
     track ? [h("h2", null, t("profile")), h("div", { class: "profile", id: "profile" })] : null,
+    hike.track && !track ? h("p", { class: "notice" }, t("trackError")) : null,
 
     h("h2", null, t("impressions")),
     impressions(hike),
@@ -307,7 +313,7 @@ async function renderDetail(hike, fit = true) {
   const profEl = document.getElementById("profile");
   if (profEl && track) {
     const days = track.days.map((d, i) => ({ segs: d.segs, color: colors[i] }));
-    const shown = day != null ? [days[day]] : days;
+    const shown = day != null ? (days[day] ? [days[day]] : []) : days;
     profile = renderProfile(profEl, shown, (p) => map.setHoverPoint(p, p ? shown[p.day].color : null));
   }
 }

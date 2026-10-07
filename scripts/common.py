@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -38,13 +39,16 @@ def read_json(path: Path, default=None):
 
 
 def write_json(path: Path, data, compact: bool = False) -> None:
+    """Запіс праз часовы файл і os.replace: перапынены запіс не пакідае паўфайла."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         if compact:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
         else:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
+    os.replace(tmp, path)
 
 
 def load_yaml(path: Path) -> dict:

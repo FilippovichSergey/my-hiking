@@ -1,0 +1,12 @@
+{
+  "name": "my-hiking",
+  "private": true,
+  "type": "module",
+  "description": "Тэсты інтэрфейсу сайта (jsdom). Сам сайт у docs/ не мае залежнасцяў ад npm.",
+  "scripts": {
+    "test": "node --test tests/js/*.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}
