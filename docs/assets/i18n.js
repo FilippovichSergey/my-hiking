@@ -9,7 +9,10 @@ const STRINGS = {
     themeToDark: "Уключыць цёмную тэму",
     themeToLight: "Уключыць светлую тэму",
     statHikes: "Паходаў",
-    statDays: "дзён у горах",
+    statDays: (n) => {
+      const word = plural(n, "дзень", "дні", "дзён");
+      return `${num(n)} ${word} ${/[аеёіоуыэюя]$/.test(word) ? "ў" : "у"} гарах`; // «дні ў гарах», «дзён у гарах»
+    },
     statDistance: "Пройдзена",
     statUp: "Набор вышыні",
     statTop: "Найвышэй",
@@ -57,7 +60,7 @@ const STRINGS = {
     themeToDark: "Switch to dark theme",
     themeToLight: "Switch to light theme",
     statHikes: "Hikes",
-    statDays: "days in the mountains",
+    statDays: (n) => `${num(n)} ${n === 1 ? "day" : "days"} in the mountains`,
     statDistance: "Distance",
     statUp: "Elevation gain",
     statTop: "Highest point",

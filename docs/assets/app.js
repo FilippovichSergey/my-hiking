@@ -121,7 +121,7 @@ function summaryTiles(hikes) {
   const up = hikes.reduce((n, hk) => n + (hk.stats?.up || 0), 0);
   const top = hikes.filter((hk) => hk.stats?.maxAlt).sort((a, b) => b.stats.maxAlt - a.stats.maxAlt)[0];
   return h("div", { class: "stats", style: "grid-template-columns: repeat(2, 1fr)" },
-    tile(t("statHikes"), num(hikes.length), null, `${num(days)} ${t("statDays")}`),
+    tile(t("statHikes"), num(hikes.length), null, t("statDays", days)),
     tile(t("statDistance"), num(km), t("km")),
     tile(t("statUp"), num(up), t("m")),
     tile(t("statTop"), top ? num(top.stats.maxAlt) : "—", top ? t("m") : null, top ? pick(top.title) : null));
