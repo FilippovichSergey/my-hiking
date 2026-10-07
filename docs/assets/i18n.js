@@ -15,7 +15,7 @@ const STRINGS = {
     },
     statDistance: "Пройдзена",
     statUp: "Набор вышыні",
-    statTop: "Найвышэй",
+    statTop: "Найвышэйшы пункт",
     search: "Пошук па назве ці рэгіёне",
     allYears: "Усе гады",
     allRegions: "Усе рэгіёны",
