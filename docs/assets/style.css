@@ -234,6 +234,7 @@ img { display: block; max-width: 100%; }
   font-size: 13px; color: var(--accent);
   text-decoration: underline; text-underline-offset: 2px;
 }
+.show-on-map { margin: 0 0 10px; }
 .sort {
   margin-left: auto; max-width: 100%;
   padding: 4px 6px;
@@ -416,6 +417,7 @@ button.link-btn { background: none; }
 .maplibregl-popup-tip { display: none; }
 .popup-title { font-weight: 650; }
 .popup-meta { color: var(--text-2); }
+.popup-nums { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 2px; color: var(--muted); }
 :root.theme-dark { --ctl-icon-filter: invert(1); }
 @media (prefers-color-scheme: dark) {
   :root:not(.theme-light) { --ctl-icon-filter: invert(1); }

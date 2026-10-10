@@ -182,6 +182,21 @@ function diffBadge(level) {
     t("difficulty")[level]);
 }
 
+/** Кароткія лічбы паходу: адлегласць, набор вышыні, колькасць дзён (калі больш за адзін). */
+function hikeNums(hk) {
+  const nums = [];
+  if (hk.stats) nums.push(`${num(hk.stats.distance, 1)} ${t("km")}`, `↑ ${num(hk.stats.up)} ${t("m")}`);
+  if (dayCount(hk) > 1) nums.push(t("days", dayCount(hk)));
+  return nums;
+}
+
+/** Радок падказкі маркера на карце: адлегласць, набор вышыні і складанасць. */
+function popupNums(hk) {
+  const nums = hikeNums(hk).slice(0, 2);
+  if (!nums.length && !hk.difficulty) return null;
+  return h("div", { class: "popup-nums" }, nums.map((n) => h("span", null, n)), diffBadge(hk.difficulty));
+}
+
 function chip(label, pressed, onclick, key) {
   return h("button", { type: "button", class: "chip", "aria-pressed": String(pressed), onclick },
     key ? h("span", { class: "key", style: `--key:${key}` }) : null, label);
@@ -222,6 +237,14 @@ function renderList() {
       onclick: () => { for (const key of Object.keys(state.filters)) state.filters[key] = ""; renderList(); },
     }, t("reset"))
     : null;
+  // Пасля фільтрацыі карта сама не рухаецца: кнопка набліжае яе да знойдзеных паходаў
+  // (на тэлефоне яшчэ і пераключае з панэлі на карту).
+  const showOnMap = reset && list.some((hk) => hk.point)
+    ? h("button", {
+      type: "button", class: "link-btn show-on-map",
+      onclick: () => { setView("map"); map.fitHikes(list); },
+    }, actionIcon("M12 21s-6.5-6.1-6.5-11a6.5 6.5 0 0 1 13 0c0 4.9-6.5 11-6.5 11zM12 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"), t("showOnMap"))
+    : null;
 
   const search = h("input", {
     class: "search", type: "search", placeholder: t("search"), "aria-label": t("search"), value: state.filters.q,
@@ -256,6 +279,7 @@ function renderList() {
       reset,
       h("select", { class: "sort", "aria-label": t("sort"), onchange: (e) => { state.sort = e.target.value; renderList(); } },
         Object.keys(SORTS).map((key) => h("option", { value: key, selected: key === state.sort }, t("sorts")[key])))),
+    showOnMap,
     list.length
       ? h("ul", { class: "hike-list" }, list.map(card))
       : h("p", { class: "empty" }, t("nothing")),
@@ -274,11 +298,7 @@ function card(hk) {
     ? h("img", { class: "thumb", src: cover.thumb, alt: "", loading: "lazy", width: 72, height: 72 })
     : h("div", { class: "thumb placeholder" });
   if (!cover) thumb.innerHTML = MOUNTAIN_ICON;
-  const nums = [];
-  if (hk.stats) {
-    nums.push(`${num(hk.stats.distance, 1)} ${t("km")}`, `↑ ${num(hk.stats.up)} ${t("m")}`);
-  }
-  if (dayCount(hk) > 1) nums.push(t("days", dayCount(hk)));
+  const nums = hikeNums(hk);
   return h("li", null, h("button", {
     type: "button", class: "card",
     onclick: () => go(hk.slug),
@@ -486,7 +506,10 @@ async function openGallery(hike, index) {
 async function main() {
   setLang(initialLang());
   // паход, выбраны на карце, адкрываецца старонкай: на тэлефоне — пераход з карты да апісання
-  map = createMap(document.getElementById("map"), { onSelect: (slug) => { setView("list"); go(slug); } });
+  map = createMap(document.getElementById("map"), {
+    onSelect: (slug) => { setView("list"); go(slug); },
+    popupExtra: popupNums,
+  });
   applyLangChrome();
 
   document.getElementById("theme-toggle").addEventListener("click", toggleTheme);

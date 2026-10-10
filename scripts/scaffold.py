@@ -259,10 +259,13 @@ def main(argv=None) -> None:
     for v in videos:
         upload = datetime.strptime(v["upload_date"], "%Y%m%d").date() if v.get("upload_date") else None
         best, best_score = None, 0
+        title_dates = dates_in_title(v["title"])
         for g in groups.values():
             score = 0
-            if any(g["start"] <= d <= g["end"] for d in dates_in_title(v["title"])):
-                score = 100
+            if title_dates:
+                # Дата ў назве адназначная: відэа іншага дня не падбіраецца па назве месца.
+                if any(g["start"] <= d <= g["end"] for d in title_dates):
+                    score = 100
             elif g["keys"] & keywords(v["title"]) and upload and \
                     g["start"] <= upload <= g["end"] + timedelta(days=VIDEO_WINDOW_DAYS):
                 score = 50 - (upload - g["end"]).days / VIDEO_WINDOW_DAYS  # бліжэйшы па часе

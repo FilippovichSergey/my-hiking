@@ -58,8 +58,16 @@ def write_json(path: Path, data, compact: bool = False) -> None:
 
 
 def load_yaml(path: Path) -> dict:
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (yaml.YAMLError, ValueError) as exc:
+        # ValueError дае, напрыклад, неісная дата без двукосся (end: 2025-02-31)
+        reason = " ".join(str(exc).split())
+        raise SystemExit(f"! {path.name}: памылка ў YAML — {reason}. Выпраўце файл і запусціце зноў.") from None
+    if not isinstance(data, dict):
+        raise SystemExit(f"! {path.name}: чакаецца спіс палёў «ключ: значэнне». Выпраўце файл і запусціце зноў.")
+    return data
 
 
 def has_track(coords) -> bool:

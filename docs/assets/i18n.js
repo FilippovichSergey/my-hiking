@@ -28,6 +28,7 @@ const STRINGS = {
     found: (n) => `${n} ${plural(n, "паход", "паходы", "паходаў")}`,
     nothing: "Нічога не знойдзена. Паспрабуйце змяніць фільтры.",
     reset: "Скінуць фільтры",
+    showOnMap: "Паказаць знойдзеныя на карце",
     sort: "Сартаванне",
     sorts: {
       new: "Спачатку новыя", old: "Спачатку старыя", short: "Найкарацейшыя", long: "Найдаўжэйшыя",
@@ -95,6 +96,7 @@ const STRINGS = {
     found: (n) => `${n} ${n === 1 ? "hike" : "hikes"}`,
     nothing: "Nothing found. Try changing the filters.",
     reset: "Reset filters",
+    showOnMap: "Show results on the map",
     sort: "Sort",
     sorts: {
       new: "Newest first", old: "Oldest first", short: "Shortest", long: "Longest",

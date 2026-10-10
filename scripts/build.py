@@ -369,15 +369,22 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
     Парадак, вокладка і пункт на карце бяруцца з папярэдняга hikes.json; калі яго няма —
     з маніфеста фота; калі няма і маніфеста — з саміх файлаў WebP.
     """
-    kept = [p for p in (prev or {}).get("photos") or [] if (DOCS / p["src"]).exists()]
-    if kept:
-        # Страчаныя файлы прыбіраюцца са спіса; парадак, вокладка і пункт астатніх фота — ранейшыя.
-        if len(kept) < len(prev["photos"]):
-            print(f"  ! {slug}: няма файлаў {len(prev['photos']) - len(kept)} апублікаваных фота — прыбраныя з галерэі")
-        photos = _existing_thumbs(slug, kept)
-        names = [Path(p["src"]).stem for p in photos]
-        old_cover = prev["photos"][prev.get("cover") or 0:][:1]  # ранейшая вокладка — па файле, а не па нумары
-        prev_cover = next((i for i, p in enumerate(kept) if old_cover and p["src"] == old_cover[0]["src"]), None)
+    prev_photos = (prev or {}).get("photos") or []
+    usable = [(i, q) for i, q in ((i, _usable_photo(p)) for i, p in enumerate(prev_photos)) if q]
+    if usable:
+        # Фота паказваюцца з тымі файламі, якія засталіся: без мініяцюры — само фота, без поўнай копіі —
+        # мініяцюра; цалкам страчаныя прыбіраюцца. Парадак, вокладка і пункт астатніх — ранейшыя.
+        photos = [q for _, q in usable]
+        for count, text in ((len(prev_photos) - len(usable), "няма файлаў {} апублікаваных фота — прыбраныя з галерэі"),
+                            (sum(q["src"] != prev_photos[i]["src"] for i, q in usable),
+                             "няма поўных копій ({}) — замест іх паказваюцца мініяцюры"),
+                            (sum(q["thumb"] != prev_photos[i]["thumb"] for i, q in usable),
+                             "няма мініяцюр ({}) — замест іх паказваюцца поўныя фота")):
+            if count:
+                print(f"  ! {slug}: {text.format(count)}")
+        names = [Path(prev_photos[i]["src"]).stem for i, _ in usable]  # імёны ранейшых поўных фота
+        # ранейшая вокладка — па месцы ў ранейшым спісе, а не па нумары ў новым
+        prev_cover = next((n for n, (i, _) in enumerate(usable) if i == (prev.get("cover") or 0)), None)
         manifest = read_json(CACHE / "photos" / f"{slug}.json", {})
         exact = [names.index(m["name"]) for key, m in manifest.items() if cover and m.get("name") in names
                  and str(cover).lower() in (key.lower(), Path(key).stem.lower())]
@@ -405,6 +412,17 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
     return _existing_thumbs(slug, photos), cover_idx or 0, gps
 
 
+def _usable_photo(p: dict) -> dict | None:
+    """Апублікаванае фота з тымі файламі, якія засталіся на дыску; None, калі няма ні аднаго."""
+    has_src, has_thumb = (DOCS / p["src"]).is_file(), (DOCS / p["thumb"]).is_file()
+    if has_src:
+        return p if has_thumb else {**p, "thumb": p["src"]}
+    if not has_thumb:
+        return None
+    with Image.open(DOCS / p["thumb"]) as im:  # поўнай копіі няма: паказваецца мініяцюра з яе памерамі
+        return {**p, "src": p["thumb"], "w": im.width, "h": im.height}
+
+
 def _existing_thumbs(slug: str, photos: list) -> list:
     """Індэкс не спасылаецца на мініяцюру, якой няма: замест яе паказваецца само фота."""
     lost = [p for p in photos if not (DOCS / p["thumb"]).exists()]
@@ -414,6 +432,29 @@ def _existing_thumbs(slug: str, photos: list) -> list:
 
 
 # --- Зборка ----------------------------------------------------------------------
+
+def unique_tours(slug: str, raw) -> list:
+    """Туры з поля `komoot:` без паўтораў (у ранейшым парадку): паўтор падвоіў бы трэк і статыстыку."""
+    seen, tours = set(), []
+    for tid in raw or []:
+        key = str(tid).strip()
+        key = int(key) if key.isdigit() else key  # кананічны ID («01» і 1 — адзін тур): па ім шукаецца файл у кэшы
+        if key in seen:
+            print(f"  ! {slug}: тур {key} пазначаны ў komoot: некалькі разоў — улічаны адзін раз")
+            continue
+        seen.add(key)
+        tours.append(key)
+    return tours
+
+
+def current_links(days: list, tours_meta: dict) -> list:
+    """Копія ранейшых дзён без спасылак на туры, якія паводле актуальных метаданых ужо не публічныя."""
+    def is_public(url: str) -> bool:
+        tid = url.rstrip("/").rsplit("/", 1)[-1]
+        meta = tours_meta.get(int(tid)) if tid.isdigit() else None
+        return meta is None or meta.get("status") == "public"  # без метаданых спасылка застаецца ранейшай
+    return [{**d, "komoot": [url for url in d.get("komoot") or [] if is_public(url)]} for d in days]
+
 
 def hike_dates(slug: str, raw_start, raw_end, days: list) -> tuple[str, str]:
     """(пачатак, канец) паходу ў ISO: `date` і `end` з YAML разам з днямі трэку; заўсёды пачатак <= канец."""
@@ -463,15 +504,15 @@ def main(argv=None) -> None:
     if not photos_available:
         print(f"! Тэчка з фота недаступная: {photos_root}. Фота не абнаўляюцца — застаюцца апублікаваныя раней.")
 
+    # Усе апісанні чытаюцца да пачатку працы: памылка ў адным файле спыняе зборку, пакуль нічога не зменена.
+    sources = [(path.stem, load_yaml(path)) for path in sorted(CONTENT.glob("*.yaml"))]
     hikes = []
-    for path in sorted(CONTENT.glob("*.yaml")):
-        slug = path.stem
-        h = load_yaml(path)
+    for slug, h in sources:
         if h.get("hidden"):
             continue
         print(f"• {slug}")
         prev = previous.get(slug)
-        tour_ids = h.get("komoot") or []
+        tour_ids = unique_tours(slug, h.get("komoot"))
         cached = {t: read_json(CACHE / "komoot" / "tours" / f"{t}.json") for t in tour_ids}
         missing = [t for t, tour in cached.items() if not tour]
         empty = [t for t, tour in cached.items() if tour and not has_track(tour.get("coords"))]
@@ -481,9 +522,16 @@ def main(argv=None) -> None:
                                           f"туры {empty} без каардынат" if empty else "") if w)
             print(f"  ! {slug}: у кэшы {what} — застаецца апублікаваны раней трэк "
                   f"(запусціце `hike komoot{' --refresh' if empty else ''}`)")
-            days, lines, track = prev["days"], prev["lines"], prev["track"]
+            # Геаметрыя ранейшая, а спасылкі — толькі на туры, якія дагэтуль публічныя.
+            days, lines, track = current_links(prev["days"], tours_meta), prev["lines"], prev["track"]
         else:
             days, lines, track = build_tracks(slug, tour_ids, offset, tours_meta)
+
+        start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
+        if not start:
+            # Без даты паход нельга ні паказаць, ні адсартаваць; пропуск выдаліў бы яго з сайта.
+            raise SystemExit(f"! {slug}: няма сапраўднай даты паходу (поле date) і трэку з датай. "
+                             f"Выпраўце {slug}.yaml і запусціце зноў — індэкс сайта не змяняўся.")
 
         folder = h.get("photos_folder")
         if folder and not (photos_available and (photos_root / folder).is_dir()):
@@ -513,7 +561,6 @@ def main(argv=None) -> None:
             print(f"  ! {slug}: невядомая складанасць '{difficulty}' (easy|medium|hard|expert)")
             difficulty = None
 
-        start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
         alts_max = [d["maxAlt"] for d in days if d["maxAlt"] is not None]
         alts_min = [d["minAlt"] for d in days if d["minAlt"] is not None]
         videos = []

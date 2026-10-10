@@ -51,7 +51,8 @@ function store(key, value) {
   } catch { return null; }
 }
 
-export function createMap(el, { onSelect }) {
+/** popupExtra(hike) — неабавязковы дадатковы радок падказкі маркера (DOM-вузел або null). */
+export function createMap(el, { onSelect, popupExtra }) {
   let base = store("map-base") || "topo";
   if (!BASES[base]) base = "topo";
   let terrainOn = false;
@@ -206,6 +207,7 @@ export function createMap(el, { onSelect }) {
     popup.setLngLat(lngLat).setDOMContent(h("div", null,
       h("div", { class: "popup-title" }, pick(hike.title)),
       h("div", { class: "popup-meta" }, dateRange(hike.date, hike.end)),
+      popupExtra?.(hike),
     )).addTo(map);
   }
 

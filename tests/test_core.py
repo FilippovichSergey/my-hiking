@@ -839,16 +839,12 @@ class TestReviewFixes(TempProject):
         for i, (start, end, _) in enumerate(cases):
             (self.content / f"h{i}.yaml").write_text(
                 f'date: {start}\nend: "{end}"\ntitle: {{be: H}}\nlocation: [41, 42]\n', encoding="utf-8")
-        (self.content / "bad.yaml").write_text('date: "2025-02-31"\ntitle: {be: B}\nlocation: [41, 42]\n',
-                                               encoding="utf-8")
         out = io.StringIO()
         with unittest.mock.patch("sys.stdout", out):
             build.main([])
         index = self.index()
         self.assertEqual([index[f"h{i}"]["end"] for i in range(len(cases))], [c[2] for c in cases])
         self.assertEqual(out.getvalue().count("дата заканчэння"), 3)
-        self.assertEqual((index["bad"]["date"], index["bad"]["end"]), ("", ""))
-        self.assertIn("bad: дата '2025-02-31' няправільная", out.getvalue())
         self.assertEqual(common.iso_date(date(2025, 5, 17)), "2025-05-17")
 
     def test_r8_4_missing_thumbnail_is_not_referenced(self):
@@ -949,6 +945,152 @@ class TestReviewFixes(TempProject):
         self.assertEqual((after["photos"], after["cover"], after["point"]), (before["photos"][:2], 0, before["point"]))
         after = lose(before["photos"][0])  # страчана сама вокладка
         self.assertEqual((after["photos"], after["cover"], after["point"]), (before["photos"][1:2], 0, before["point"]))
+
+    # --- review_2026-10-11_v1.3.0.md ---
+
+    def test_r10_1_repeated_tour_id_is_counted_once(self):
+        self.photos_root.mkdir()
+        pts = [[41.0 + i * 0.001, 42.0, 1000.0 + i, i] for i in range(10)]
+        self.add_tour(1, "2025-01-01T06:00:00Z", pts, status="public", distance=3000)
+        self.add_tour(2, "2025-01-02T06:00:00Z", pts, status="public", distance=2000)
+        results = {}
+        for name, tours in (("plain", "[1, 2]"), ("twice", "[1, 1, 2]"), ("mixed", '[1, "1", 2, 2]'),
+                            ("spaces", '[" 1 ", 1, 2]'), ("spaces2", '[1, " 1 ", " 2 "]'),
+                            ("zeros", '["01", 1, 2]'), ("zeros2", '[1, "01", 2]')):
+            (self.content / "h.yaml").write_text(f"date: 2025-01-01\ntitle: {{be: H}}\nkomoot: {tours}\n",
+                                                 encoding="utf-8")
+            (build.DOCS / "data" / "hikes.json").unlink(missing_ok=True)  # без ранейшага індэкса: трэк толькі з кэша
+            out = io.StringIO()
+            with unittest.mock.patch("sys.stdout", out):
+                build.main([])
+            h = self.index()["h"]
+            results[name] = ({k: h[k] for k in ("stats", "days", "lines", "track")}, out.getvalue())
+        plain = results["plain"][0]
+        self.assertEqual((plain["stats"]["distance"], len(plain["days"]), len(plain["lines"])), (5.0, 2, 2))
+        self.assertEqual(plain["days"][0]["komoot"], ["https://www.komoot.com/tour/1"])
+        self.assertNotIn("некалькі разоў", results["plain"][1])
+        for name in ("twice", "mixed", "spaces", "spaces2", "zeros", "zeros2"):
+            self.assertEqual(results[name][0], plain, name)
+            self.assertIn("тур 1 пазначаны ў komoot: некалькі разоў", results[name][1], name)
+        self.assertEqual(results["mixed"][1].count("некалькі разоў"), 2)
+
+    def test_r10_2_video_with_another_date_is_not_matched_by_place(self):
+        (self.photos_root / "20250201_Mtirala" / "Сайт").mkdir(parents=True)
+        common.write_json(build.CACHE / "komoot" / "tours.json", [])
+        common.write_json(build.CACHE / "youtube.json", [
+            {"id": "old", "title": "Mtirala 1 студзеня 2025", "upload_date": "20250205"},   # студзеньскі паход
+            {"id": "same", "title": "Mtirala 1 лютага 2025", "upload_date": "20250301"},
+            {"id": "nodate", "title": "Mtirala waterfall", "upload_date": "20250205"}])
+        scaffold.main([])
+        draft = yaml.safe_load(next(self.content.glob("*.yaml")).read_text(encoding="utf-8"))
+        self.assertEqual((draft["date"], sorted(draft["youtube"])), (date(2025, 2, 1), ["nodate", "same"]))
+
+    def test_r10_bad_dates_stop_the_build_before_publishing(self):
+        folder = self.photos_root / "20250101_H" / "Сайт"
+        self.exif_jpeg(folder / "A.jpg", (255, 0, 0), taken="2025:01:01 09:00:00", gps=[42.01, 41.01])
+        self.write_hike()
+        build.main([])
+        published = (build.DOCS / "data" / "hikes.json").read_bytes()
+        self.exif_jpeg(folder / "B.jpg", (0, 0, 255), taken="2025:01:01 10:00:00")  # змена, якая не павінна выйсці
+        cases = {
+            "end: 2025-02-31": ("date: 2025-02-01\nend: 2025-02-31\n", "zz.yaml: памылка ў YAML"),
+            "date: 2025-02-31": ("date: 2025-02-31\n", "zz.yaml: памылка ў YAML"),
+            'date: "2025-02-31"': ('date: "2025-02-31"\n', "zz: няма сапраўднай даты паходу"),
+            "без date": ("", "zz: няма сапраўднай даты паходу"),
+            "не слоўнік": ("- 1\n- 2\n", "zz.yaml: чакаецца спіс палёў"),
+        }
+        for name, (head, message) in cases.items():
+            text = head if name == "не слоўнік" else head + "title: {be: Z}\nlocation: [41, 42]\n"
+            (self.content / "zz.yaml").write_text(text, encoding="utf-8")
+            with self.assertRaises(SystemExit, msg=name) as caught, unittest.mock.patch("sys.stdout", io.StringIO()):
+                build.main([])
+            self.assertIn(message, str(caught.exception), name)
+            self.assertEqual((build.DOCS / "data" / "hikes.json").read_bytes(), published, name)
+            self.referenced_files_exist()
+        # з трэкам няправільная date не спыняе зборку: пачатак бярэцца з першага дня трэку
+        pts = [[41.0 + i * 0.001, 42.0, 1000.0 + i, i] for i in range(10)]
+        self.add_tour(5, "2025-03-04T06:00:00Z", pts, distance=3000)
+        (self.content / "zz.yaml").write_text('date: "2025-02-31"\ntitle: {be: Z}\nkomoot: [5]\n', encoding="utf-8")
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stdout", out):
+            build.main([])
+        index = self.index()
+        self.assertEqual((index["zz"]["date"], index["zz"]["end"], len(index["h"]["photos"])), ("2025-03-04", "2025-03-04", 2))
+        self.assertIn("zz: дата '2025-02-31' няправільная", out.getvalue())
+
+    # --- review_2026-10-11_v1.3.1.md ---
+
+    def test_r11_1_kept_track_drops_links_to_tours_that_became_private(self):
+        self.photos_root.mkdir()
+        pts = [[41.0 + i * 0.001, 42.0, 1000.0 + i, i] for i in range(10)]
+        tours = {tid: self.add_tour(tid, iso, pts, status="public", distance=3000)
+                 for tid, iso in ((1, "2025-01-01T06:00:00Z"), (2, "2025-01-01T12:00:00Z"), (3, "2025-01-02T06:00:00Z"))}
+        meta = lambda private=(): [  # noqa: E731
+            {"id": tid, "name": f"t{tid}", "sport": "hike", "date": t["date"], "changed_at": "same",
+             "status": "private" if tid in private else "public", "distance": 3000} for tid, t in tours.items()]
+        common.write_json(build.CACHE / "komoot" / "tours.json", meta())
+        (self.content / "h.yaml").write_text("date: 2025-01-01\ntitle: {be: H}\nkomoot: [1, 2, 3]\n", encoding="utf-8")
+        build.main([])
+        before = self.index()["h"]
+        link = "https://www.komoot.com/tour/{}".format
+        self.assertEqual([d["komoot"] for d in before["days"]], [[link(1), link(2)], [link(3)]])
+
+        def kept_without(private):
+            build.main([])
+            after = self.index()["h"]
+            for k in ("track", "lines", "stats"):
+                self.assertEqual(after[k], before[k], k)
+            strip = lambda days: [{k: v for k, v in d.items() if k != "komoot"} for d in days]  # noqa: E731
+            self.assertEqual(strip(after["days"]), strip(before["days"]))
+            self.assertEqual([d["komoot"] for d in after["days"]],
+                             [[link(t) for t in day if t not in private] for day in ((1, 2), (3,))])
+            self.referenced_files_exist()
+
+        # 1) файл каардынат тура 1 прапаў, а ў метаданых ён ужо прыватны
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        common.write_json(build.CACHE / "komoot" / "tours.json", meta(private={1}))
+        kept_without({1})
+        # 2) імпарт атрымаў няпоўны адказ для тура 3, які таксама стаў прыватным
+        out = self.run_komoot(meta(private={1, 3}), {1: {"id": 1}, 2: {"id": 2}, 3: {"id": 3}})
+        self.assertIn("без каардынат", out)
+        kept_without({1, 3})
+        # 3) метаданых няма зусім — спасылкі застаюцца ранейшыя
+        (build.CACHE / "komoot" / "tours.json").unlink()
+        build.main([])
+        self.assertEqual([d["komoot"] for d in self.index()["h"]["days"]], [[link(2)], []])
+
+    # --- review_2026-10-11_v1.3.2.md ---
+
+    def test_r12_1_lost_full_photos_fall_back_to_thumbnails_in_place(self):
+        folder = self.photos_root / "20250101_H" / "Сайт"
+        self.exif_jpeg(folder / "B.jpg", (0, 0, 255), size=(800, 600), taken="2025:01:01 09:00:00", gps=[42.01, 41.01])
+        self.exif_jpeg(folder / "A.jpg", (255, 0, 0), size=(800, 600), taken="2025:01:01 10:00:00")
+        self.exif_jpeg(folder / "C-t.jpg", (0, 255, 0), size=(800, 600), taken="2025:01:01 11:00:00")  # імя на «-t»
+        self.write_hike()
+        build.main([])
+        before = self.index()["h"]
+        self.assertEqual(([stem(p["src"]) for p in before["photos"]], before["cover"], before["point"]),
+                         (["b", "a", "c-t"], 0, [41.01, 42.01]))
+        self.assertEqual((before["photos"][0]["w"], before["photos"][0]["h"]), (400, 300))
+        for photo in before["photos"][:2]:  # страчаны поўныя копіі B і A; мініяцюры засталіся
+            (build.DOCS / photo["src"]).unlink()
+        self.cfg["photos_root"] = str(self.root / "missing-disk")
+        index_file = build.DOCS / "data" / "hikes.json"
+        published = index_file.read_bytes()
+        for with_manifest in (True, False):
+            index_file.write_bytes(published)  # кожны варыянт — ад таго самага апублікаванага індэкса
+            if not with_manifest:
+                (build.CACHE / "photos" / "h.json").unlink()
+            out = io.StringIO()
+            with unittest.mock.patch("sys.stdout", out):
+                build.main([])
+            after = self.index()["h"]
+            for was, now in zip(before["photos"][:2], after["photos"][:2]):
+                self.assertEqual(now, {"src": was["thumb"], "thumb": was["thumb"], "w": 100, "h": 75}, with_manifest)
+            self.assertEqual(after["photos"][2], before["photos"][2], "фота з імем на «-t» застаецца як было")
+            self.assertEqual((len(after["photos"]), after["cover"], after["point"]), (3, 0, before["point"]))
+            self.assertIn("няма поўных копій (2) — замест іх паказваюцца мініяцюры", out.getvalue())
+            self.referenced_files_exist()
 
     def test_index_carries_project_version(self):
         version = (common.ROOT / "VERSION").read_text(encoding="utf-8").strip()

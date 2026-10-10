@@ -31,14 +31,21 @@ class FakeMap {
   getCanvas() { return { style: {} }; }
   getBearing() { return 0; }
   addControl() {} setLayoutProperty() {} setPaintProperty() {} setFeatureState() {}
-  fitBounds() {} flyTo() {} easeTo() {} resize() {} setTerrain() {} setSky() {}
+  fitBounds(...args) { (this.fits ||= []).push(args); }
+  flyTo() {} easeTo() {} resize() {} setTerrain() {} setSky() {}
 }
 
 const maplibregl = {
   Map: FakeMap,
   NavigationControl: class {},
   ScaleControl: class {},
-  Popup: class { setLngLat() { return this; } setDOMContent() { return this; } addTo() { return this; } remove() {} },
+  Popup: class {
+    static content = null; // змесціва апошняй паказанай падказкі
+    setLngLat() { return this; }
+    setDOMContent(node) { maplibregl.Popup.content = node; return this; }
+    addTo() { return this; }
+    remove() {}
+  },
   LngLatBounds: class { extend() { return this; } },
 };
 
@@ -385,4 +392,41 @@ test("падвал паказвае версію сайта з індэкса", 
   await go("#/en");
   assert.equal(footer().textContent, "My hikes · version 9.8.7");
   await go("#/be");
+});
+
+test("фільтры і карта: «Паказаць знойдзеныя на карце» і лічбы ў падказцы маркера", async () => {
+  await go("#/be");
+  const layout = document.querySelector(".layout");
+  const showOnMap = () => panel().querySelector(".show-on-map");
+  const choose = (label, value) => {
+    const select = panel().querySelector(`.filter-row select[aria-label="${label}"]`);
+    select.value = value;
+    select.dispatchEvent(new window.Event("change"));
+  };
+  assert.equal(showOnMap(), null, "без фільтраў кнопкі няма");
+
+  choose("Любая адлегласць", "long"); // застаецца адзін паход — «late»
+  assert.equal(showOnMap().textContent, "Паказаць знойдзеныя на карце");
+  const fitsBefore = FakeMap.last.fits.length;
+  showOnMap().click();
+  assert.equal(FakeMap.last.fits.length, fitsBefore + 1, "карта набліжаецца да знойдзеных паходаў");
+  assert.equal(layout.dataset.view, "map", "на тэлефоне адкрываецца карта");
+  assert.deepEqual(FakeMap.last.sources.hikes.data.features.map((f) => f.properties.slug), ["late"]);
+
+  choose("Любая працягласць", "multi"); // нічога не знойдзена
+  assert.equal(panel().querySelectorAll(".card").length, 0);
+  assert.equal(showOnMap(), null, "няма чаго паказваць");
+  panel().querySelector(".reset").click();
+  assert.equal(showOnMap(), null);
+  document.querySelector('[data-view-btn="list"]').click();
+
+  // падказка маркера: назва, дата, адлегласць, набор вышыні і складанасць
+  const hover = (slug) => {
+    FakeMap.last.handlers.mouseenter[0]({ features: [{ properties: { slug }, geometry: { coordinates: [42, 41] } }] });
+    return [...maplibregl.Popup.content.children].map((el) => el.textContent);
+  };
+  assert.deepEqual(hover("guria"), ["guria", "1 студзеня 2025", "5 км↑ 900 мВельмі цяжка"]);
+  assert.equal(maplibregl.Popup.content.querySelector(".popup-nums .diff").dataset.difficulty, "expert");
+  assert.deepEqual(hover("slow"), ["slow", "1 студзеня 2025", "10 км↑ 100 м"], "без складанасці — толькі лічбы");
+  assert.deepEqual(hover("notrack"), ["notrack", "1 студзеня 2025"], "без трэку і складанасці радка няма");
 });
