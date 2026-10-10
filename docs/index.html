@@ -25,7 +25,7 @@
   <script type="module" src="assets/app.js"></script>
 </head>
 <body>
-  <div class="layout">
+  <div class="layout" data-view="list">
     <aside class="panel" id="panel" aria-label="Паходы">
       <header class="panel-head">
         <a class="brand" href="#" id="brand">
@@ -43,6 +43,12 @@
           </button>
         </div>
       </header>
+      <div class="view-toggle">
+        <div class="seg" role="group" id="view-seg" aria-label="Выгляд">
+          <button type="button" data-view-btn="list" aria-pressed="true">Спіс</button>
+          <button type="button" data-view-btn="map" aria-pressed="false">Карта</button>
+        </div>
+      </div>
       <div class="panel-body" id="panel-body">
         <p class="loading">…</p>
       </div>

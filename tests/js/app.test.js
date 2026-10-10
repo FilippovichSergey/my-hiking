@@ -203,3 +203,37 @@ test("складанасць паказваецца іконкай са спра
   const sprite = readFileSync(new URL("docs/assets/difficulty-sprite.svg", ROOT), "utf8");
   for (const id of ["easy", "moderate", "hard", "very-hard"]) assert.ok(sprite.includes(`id="difficulty-${id}"`), id);
 });
+
+test("тэлефон: пераключальнік «Спіс / Карта» і выбар паходу на карце", async () => {
+  await go("#/be");
+  const layout = document.querySelector(".layout");
+  const [listBtn, mapBtn] = document.querySelectorAll("[data-view-btn]");
+  const pressed = () => [listBtn, mapBtn].map((b) => b.getAttribute("aria-pressed")).join();
+  assert.equal(layout.dataset.view, "list", "спачатку паказваецца спіс");
+  assert.deepEqual([listBtn.textContent, mapBtn.textContent, pressed()], ["Спіс", "Карта", "true,false"]);
+
+  mapBtn.click();
+  assert.equal(layout.dataset.view, "map");
+  assert.equal(pressed(), "false,true");
+
+  // націсканне на маркер адкрывае паход і вяртае з карты да яго апісання
+  FakeMap.last.handlers.click[0]({ features: [{ properties: { slug: "guria" } }] });
+  await tick(60);
+  assert.equal(window.location.hash, "#/be/guria");
+  assert.equal(layout.dataset.view, "list");
+  assert.deepEqual([listBtn.textContent, pressed()], ["Апісанне", "true,false"]);
+
+  // карта паходу; вяртанне да спіса выгляд не мяняе
+  mapBtn.click();
+  await go("#/be");
+  assert.equal(layout.dataset.view, "map");
+  assert.equal(listBtn.textContent, "Спіс");
+
+  document.querySelector('[data-lang="en"]').click();
+  await tick(60);
+  assert.deepEqual([listBtn.textContent, mapBtn.textContent], ["List", "Map"]);
+  document.querySelector('[data-lang="be"]').click();
+  listBtn.click();
+  await tick(60);
+  assert.equal(layout.dataset.view, "list");
+});

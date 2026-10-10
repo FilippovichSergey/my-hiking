@@ -109,10 +109,21 @@ img { display: block; max-width: 100%; }
 .map-wrap { position: relative; min-width: 0; }
 #map { position: absolute; inset: 0; }
 
+.view-toggle { display: none; }
+
+/* Тэлефон: шапка, пераключальнік «Спіс / Карта» і ніжэй на ўсю вышыню — або панэль, або карта.
+   Схаваная карта застаецца ў раскладцы (visibility, не display), таму маштаб пад трэк лічыцца
+   па сапраўдным памеры і пераключэнне не патрабуе перамалёўкі. */
 @media (max-width: 760px) {
-  .layout { display: flex; flex-direction: column; }
-  .map-wrap { order: -1; flex: 0 0 44dvh; }
-  .panel { flex: 1 1 auto; border-right: 0; border-top: 1px solid var(--border); }
+  .layout { --m-rows: 59px 49px minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); grid-template-rows: var(--m-rows); }
+  .panel { grid-area: 1 / 1 / 4 / 2; display: grid; grid-template-rows: var(--m-rows); border-right: 0; }
+  .map-wrap { grid-area: 3 / 1 / 4 / 2; }
+  .view-toggle { display: block; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+  .view-toggle .seg { display: flex; }
+  .view-toggle .seg button { flex: 1; height: 28px; padding: 0 9px; }
+  /* «*» і !important — бо MapLibre сам задае visibility сваім элементам (подпіс з аўтарствам) */
+  .layout:not([data-view="map"]) .map-wrap, .layout:not([data-view="map"]) .map-wrap *,
+  .layout[data-view="map"] .panel-body, .layout[data-view="map"] .panel-body * { visibility: hidden !important; }
 }
 
 /* ---- Шапка панэлі ------------------------------------------------------ */

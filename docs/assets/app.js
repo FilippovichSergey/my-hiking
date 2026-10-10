@@ -16,6 +16,7 @@ const state = {
   filters: { q: "", year: "", region: "", difficulty: "" },
   selected: null,
   day: null,
+  view: "list", // тэлефон: што на экране — панэль ("list") ці карта ("map")
 };
 const trackCache = new Map();
 let map, profile, renderToken = 0;
@@ -62,6 +63,22 @@ function onThemeChange() {
   if (state.selected) renderDetail(state.selected, false);
 }
 
+// На тэлефоне панэль і карта не змяшчаюцца разам: паказваецца нешта адно (гл. .layout[data-view] у CSS).
+function setView(view) {
+  state.view = view;
+  document.querySelector(".layout").dataset.view = view;
+  updateViewToggle();
+}
+function updateViewToggle() {
+  document.getElementById("view-seg").setAttribute("aria-label", t("view"));
+  for (const b of document.querySelectorAll("[data-view-btn]")) {
+    const view = b.dataset.viewBtn;
+    // без перакладу (у кэшы браўзера яшчэ стары i18n.js) застаецца подпіс з разметкі
+    b.textContent = (view === "map" ? t("viewMap") : state.selected ? t("viewHike") : t("viewList")) || b.textContent;
+    b.setAttribute("aria-pressed", String(view === state.view));
+  }
+}
+
 function applyLangChrome() {
   document.documentElement.lang = lang;
   document.getElementById("site-title").textContent = t("siteTitle");
@@ -70,6 +87,7 @@ function applyLangChrome() {
   document.querySelector('meta[name="description"]').content = t("siteDescription");
   for (const b of document.querySelectorAll("[data-lang]")) b.setAttribute("aria-pressed", String(b.dataset.lang === lang));
   map?.updateControls();
+  updateViewToggle();
   onThemeChange();
 }
 
@@ -157,6 +175,7 @@ function renderList() {
   const wasSelected = !!state.selected;
   state.selected = null;
   state.day = null;
+  updateViewToggle();
   document.title = t("siteTitle");
   map.clearSelection();
 
@@ -239,6 +258,7 @@ async function loadTrack(hike) {
 async function renderDetail(hike, fit = true) {
   const token = ++renderToken;
   state.selected = hike;
+  updateViewToggle();
   document.title = `${pick(hike.title)} · ${t("siteTitle")}`;
   const track = await loadTrack(hike);
   if (token !== renderToken) return;
@@ -370,7 +390,8 @@ async function openGallery(hike, index) {
 
 async function main() {
   setLang(initialLang());
-  map = createMap(document.getElementById("map"), { onSelect: go });
+  // паход, выбраны на карце, адкрываецца старонкай: на тэлефоне — пераход з карты да апісання
+  map = createMap(document.getElementById("map"), { onSelect: (slug) => { setView("list"); go(slug); } });
   applyLangChrome();
 
   document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
@@ -386,6 +407,7 @@ async function main() {
     });
   }
   document.getElementById("brand").addEventListener("click", (e) => { e.preventDefault(); go(null); });
+  for (const b of document.querySelectorAll("[data-view-btn]")) b.addEventListener("click", () => setView(b.dataset.viewBtn));
 
   const data = await fetch("data/hikes.json").then((r) => r.json());
   state.hikes = data.hikes;
