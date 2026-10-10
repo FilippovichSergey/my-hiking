@@ -18,7 +18,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, load_yaml, read_json, site_photos_dir, slugify,
+from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, read_version, load_yaml, read_json, site_photos_dir, slugify,
                     tour_local_datetime, write_json)
 from geo import haversine, simplify
 
@@ -555,7 +555,8 @@ def main(argv=None) -> None:
 
     hikes.sort(key=lambda h: h["date"], reverse=True)
     write_json(DOCS / "data" / "hikes.json",
-               {"generated": datetime.now(timezone.utc).isoformat(timespec="seconds"), "hikes": hikes}, compact=True)
+               {"generated": datetime.now(timezone.utc).isoformat(timespec="seconds"), "version": read_version(),
+                "hikes": hikes}, compact=True)
     # Новы індэкс запісаны — цяпер можна прыбраць файлы, на якія ён ужо не спасылаецца.
     _remove(pending)
     (DOCS / ".nojekyll").touch()

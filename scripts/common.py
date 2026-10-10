@@ -31,6 +31,12 @@ def site_photos_dir(folder: Path, cfg: dict) -> Path | None:
     return None
 
 
+def read_version() -> str:
+    """Версія праекта з файла VERSION (паказваецца ў падвале сайта); пусты радок, калі файла няма."""
+    path = ROOT / "VERSION"
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+
 def read_json(path: Path, default=None):
     if not path.exists():
         return default

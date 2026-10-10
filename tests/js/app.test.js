@@ -52,6 +52,7 @@ const hike = (slug, region, extra = {}) => ({
   track: `data/tracks/${slug}.json`, cover: null, photos: [], videos: [], impressions: { be: "", en: "" }, ...extra,
 });
 const DATA = {
+  version: "9.8.7",
   hikes: [
     hike("slow", { be: "Аджарыя", en: "Adjara" }),
     hike("guria", { be: "Гурыя", en: "Guria" }, { difficulty: "expert", stats: stats(5, 900) }),
@@ -370,4 +371,18 @@ test("старонка паходу: «Спампаваць GPX» і «Падз�
     delete window.navigator.clipboard;
     await go("#/be");
   }
+});
+
+test("падвал паказвае версію сайта з індэкса", async () => {
+  await go("#/be");
+  const footer = () => panel().querySelector("footer.site-footer");
+  assert.equal(footer().textContent, "Мае паходы · версія 9.8.7");
+  assert.equal(panel().lastElementChild, footer(), "падвал — апошні элемент спіса");
+  await go("#/be/guria");
+  await waitFor(() => panel().querySelector(".detail"), "старонка паходу");
+  assert.equal(footer().textContent, "Мае паходы · версія 9.8.7");
+  assert.equal(panel().lastElementChild, footer(), "падвал — апошні элемент старонкі паходу");
+  await go("#/en");
+  assert.equal(footer().textContent, "My hikes · version 9.8.7");
+  await go("#/be");
 });

@@ -19,6 +19,7 @@ const state = {
   selected: null,
   day: null,
   view: "list", // тэлефон: што на экране — панэль ("list") ці карта ("map")
+  version: "", // версія сайта з індэкса (яе запісвае `hike build` з файла VERSION)
 };
 const trackCache = new Map();
 let map, profile, renderToken = 0;
@@ -192,6 +193,11 @@ function select(options, value, allLabel, onchange, label) {
     options.map(([v, text]) => h("option", { value: v, selected: v === value }, text)));
 }
 
+/** Падвал панэлі: назва сайта і версія. */
+function siteFooter() {
+  return state.version ? h("footer", { class: "site-footer" }, `${t("siteTitle")} · ${t("version", state.version)}`) : null;
+}
+
 // --- Спіс паходаў -----------------------------------------------------------
 
 function renderList() {
@@ -253,6 +259,7 @@ function renderList() {
     list.length
       ? h("ul", { class: "hike-list" }, list.map(card))
       : h("p", { class: "empty" }, t("nothing")),
+    siteFooter(),
   );
   map.setHikes(list);
   if (wasSelected || !renderList.fitted) {
@@ -411,8 +418,10 @@ async function renderDetail(hike, fit = true) {
     ] : null,
   ));
 
+  sections.push(siteFooter());
+
   const scrollTop = body.scrollTop;
-  body.replaceChildren(...sections);
+  body.replaceChildren(...sections.filter(Boolean));
   body.scrollTop = fit ? 0 : scrollTop;
 
   map.select(hike, track, day, fit);
@@ -497,6 +506,7 @@ async function main() {
 
   const data = await fetch("data/hikes.json").then((r) => r.json());
   state.hikes = data.hikes;
+  state.version = data.version || "";
   window.addEventListener("hashchange", route);
   route();
 }

@@ -4,6 +4,7 @@ const STRINGS = {
   be: {
     siteTitle: "Мае паходы",
     siteDescription: "Карта маіх хайкінгаў: трэкі, фота, відэа і ўражанні.",
+    version: (v) => `версія ${v}`,
     panel: "Паходы",
     map: "Карта",
     view: "Выгляд",
@@ -73,6 +74,7 @@ const STRINGS = {
   en: {
     siteTitle: "My hikes",
     siteDescription: "A map of my hikes: tracks, photos, videos and impressions.",
+    version: (v) => `version ${v}`,
     panel: "Hikes",
     map: "Map",
     view: "View",

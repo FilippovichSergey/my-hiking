@@ -950,6 +950,17 @@ class TestReviewFixes(TempProject):
         after = lose(before["photos"][0])  # страчана сама вокладка
         self.assertEqual((after["photos"], after["cover"], after["point"]), (before["photos"][1:2], 0, before["point"]))
 
+    def test_index_carries_project_version(self):
+        version = (common.ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.photos_root.mkdir()
+        (self.content / "h.yaml").write_text("date: 2025-01-01\ntitle: {be: H}\nlocation: [41, 42]\n", encoding="utf-8")
+        build.main([])
+        self.assertEqual(common.read_json(build.DOCS / "data" / "hikes.json")["version"], version)
+        # падвал апублікаванага сайта паказвае версію з індэкса: пасля змены VERSION патрэбны `hike build`
+        published = common.read_json(common.ROOT / "docs" / "data" / "hikes.json")
+        self.assertEqual(published.get("version"), version, "запусціце `hike build`: у docs/data/hikes.json старая версія")
+
     def test_write_json_is_atomic(self):
         path = self.root / "x.json"
         common.write_json(path, {"a": 1})
