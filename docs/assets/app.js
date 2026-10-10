@@ -122,6 +122,12 @@ function regionKey(hk) { return hk.region.en || hk.region.be || ""; }
 // Нагрузка: агульная адлегласць паходу (км) і колькасць дзён.
 const DISTANCES = { short: [0, 10], mid: [10, 20], long: [20, Infinity] };
 const DAY_COUNTS = { one: (n) => n <= 1, multi: (n) => n > 1 };
+/** Колькасць дзён паходу: дні з трэкам, а без трэку — каляндарныя дні ад пачатку да заканчэння. */
+function dayCount(hk) {
+  if (hk.days.length) return hk.days.length;
+  const span = Math.round((Date.parse(hk.end) - Date.parse(hk.date)) / 864e5) + 1;
+  return span > 1 ? span : 1;
+}
 // Паходы без трэку (без лічбаў) пры сартаванні па нагрузцы ідуць у канец.
 const byStat = (key, dir) => (a, b) =>
   dir * ((a.stats?.[key] ?? dir * Infinity) - (b.stats?.[key] ?? dir * Infinity));
@@ -143,7 +149,7 @@ function filtered() {
     (!region || regionKey(hk) === region) &&
     (!difficulty || hk.difficulty === difficulty) &&
     (!distance || (hk.stats != null && hk.stats.distance >= minKm && hk.stats.distance < maxKm)) &&
-    (!days || DAY_COUNTS[days](hk.days.length)) &&
+    (!days || DAY_COUNTS[days](dayCount(hk))) &&
     (!needle || [hk.title.be, hk.title.en, hk.region.be, hk.region.en].some((s) => s?.toLowerCase().includes(needle))));
 }
 
@@ -155,7 +161,7 @@ function tile(label, value, unit, sub) {
 }
 
 function summaryTiles(hikes) {
-  const days = hikes.reduce((n, hk) => n + Math.max(1, hk.days.length), 0);
+  const days = hikes.reduce((n, hk) => n + dayCount(hk), 0);
   const km = hikes.reduce((n, hk) => n + (hk.stats?.distance || 0), 0);
   const up = hikes.reduce((n, hk) => n + (hk.stats?.up || 0), 0);
   const top = hikes.filter((hk) => hk.stats?.maxAlt).sort((a, b) => b.stats.maxAlt - a.stats.maxAlt)[0];
@@ -263,8 +269,8 @@ function card(hk) {
   const nums = [];
   if (hk.stats) {
     nums.push(`${num(hk.stats.distance, 1)} ${t("km")}`, `↑ ${num(hk.stats.up)} ${t("m")}`);
-    if (hk.days.length > 1) nums.push(t("days", hk.days.length));
   }
+  if (dayCount(hk) > 1) nums.push(t("days", dayCount(hk)));
   return h("li", null, h("button", {
     type: "button", class: "card",
     onclick: () => go(hk.slug),
@@ -318,7 +324,7 @@ async function renderDetail(hike, fit = true) {
     h("div", { class: "meta" },
       h("span", null, dateRange(hike.date, hike.end)),
       pick(hike.region) ? h("span", null, pick(hike.region)) : null,
-      hike.days.length > 1 ? h("span", null, t("days", hike.days.length)) : null,
+      dayCount(hike) > 1 ? h("span", null, t("days", dayCount(hike))) : null,
       diffBadge(hike.difficulty)),
 
     dayStats ? h("div", { class: "stats" },

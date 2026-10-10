@@ -137,6 +137,10 @@ def render_yaml(h: dict, today: str) -> str:
     lines = [
         f"# Чарнавік створаны аўтаматычна {today}: праверце і дапоўніце.",
         f"date: {h['start'].isoformat()}",
+    ]
+    if not h["tours"] and h.get("end") and h["end"] > h["start"]:
+        lines.append(f"end: {h['end'].isoformat()}             # апошні дзень (з назвы тэчкі): патрэбны, бо няма трэку")
+    lines += [
         "title:",
         f"  be: {yaml_str(h['title'])}",
         '  en: ""                    # калі пуста, паказваецца беларуская назва',
@@ -240,6 +244,13 @@ def main(argv=None) -> None:
         print("Новых паходаў не знойдзена.")
         return
 
+    # Тэчка магла «з'ехаць» на дзень: межы паходу ўключаюць дні ўсіх яго тураў.
+    for g in groups.values():
+        g["tours"].sort(key=lambda t: t["local"])
+        if g["tours"]:
+            g["start"] = min(g["start"], g["tours"][0]["local"].date())
+            g["end"] = max(g["end"], g["tours"][-1]["local"].date())
+
     # 3. Падбіраем відэа: дата ў назве > супадзенне назваў месцаў.
     videos = [v for v in read_json(CACHE / "youtube.json", []) if v["id"] not in used_videos]
     for g in groups.values():
@@ -264,7 +275,6 @@ def main(argv=None) -> None:
     CONTENT.mkdir(parents=True, exist_ok=True)
     today = date.today().isoformat()
     for g in sorted(groups.values(), key=lambda g: g["start"]):
-        g["tours"].sort(key=lambda t: t["local"])
         if (not g["title"] or GENERIC_NAME_RE.match(g["title"].strip())) and g["tours"]:
             sp = g["tours"][0].get("start_point") or {}
             if sp:

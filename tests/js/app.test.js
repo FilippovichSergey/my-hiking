@@ -60,6 +60,9 @@ const DATA = {
     hike("mismatch", { be: "Гурыя", en: "Guria" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
     hike("late", { be: "Гурыя", en: "Guria" }, { stats: stats(25, 300) }),
     hike("notrack", { be: "Гурыя", en: "Guria" }, { stats: null, days: [], track: null, lines: [], bbox: null }),
+    // трохдзённы паход без трэку: працягласць вядомая толькі з дат
+    hike("trek3", { be: "Гурыя", en: "Guria" },
+      { stats: null, days: [], track: null, lines: [], bbox: null, end: "2025-01-03" }),
   ],
 };
 const TRACK = { days: [{ segs: [[[42, 41, 1000, 0], [42.1, 41.1, 1100, 1]]] }] };
@@ -252,16 +255,16 @@ test("сартаванне, фільтры па нагрузцы і «Скіну
   const sortBy = (key) => choose("select.sort", key);
   const DISTANCE = '.filter-row select[aria-label="Любая адлегласць"]';
   const DAYS = '.filter-row select[aria-label="Любая працягласць"]';
-  const all = ["slow", "guria", "broken", "mismatch", "late", "notrack"];
+  const all = ["slow", "guria", "broken", "mismatch", "late", "notrack", "trek3"];
   assert.deepEqual(titles(), all, "спачатку новыя — парадак з даных");
   assert.equal(panel().querySelector(".reset"), null, "без фільтраў кнопкі скіду няма");
 
   sortBy("short");
-  assert.deepEqual(titles(), ["guria", "slow", "broken", "mismatch", "late", "notrack"]);
+  assert.deepEqual(titles(), ["guria", "slow", "broken", "mismatch", "late", "notrack", "trek3"]);
   sortBy("long");
-  assert.deepEqual(titles(), ["late", "slow", "broken", "mismatch", "guria", "notrack"], "паход без трэку — у канцы");
+  assert.deepEqual(titles(), ["late", "slow", "broken", "mismatch", "guria", "notrack", "trek3"], "паходы без трэку — у канцы");
   sortBy("up");
-  assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack"]);
+  assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack", "trek3"]);
 
   choose(DISTANCE, "mid");
   assert.deepEqual(titles(), ["slow", "broken", "mismatch"]);
@@ -273,7 +276,7 @@ test("сартаванне, фільтры па нагрузцы і «Скіну
   assert.ok(panel().querySelector(".empty"));
 
   panel().querySelector(".reset").click();
-  assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack"], "усе паходы, сартаванне застаецца");
+  assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack", "trek3"], "усе паходы, сартаванне застаецца");
   assert.deepEqual([...panel().querySelectorAll(".filter-row select")].map((el) => el.value), ["", "", "", ""]);
   assert.equal(panel().querySelector(".reset"), null);
   assert.equal(panel().querySelector("select.sort").value, "up");
@@ -283,4 +286,29 @@ test("сартаванне, фільтры па нагрузцы і «Скіну
   panel().querySelector(".reset").click();
   sortBy("new");
   assert.deepEqual(titles(), all);
+});
+
+test("шматдзённы паход без трэку лічыцца па датах (review v1.0.6, №3)", async () => {
+  await go("#/be");
+  const titles = () => [...panel().querySelectorAll(".card-title")].map((el) => el.textContent);
+  const chooseDays = (value) => {
+    const select = panel().querySelector('.filter-row select[aria-label="Любая працягласць"]');
+    select.value = value;
+    select.dispatchEvent(new window.Event("change"));
+  };
+  // 4 аднадзённыя + 2 двухдзённыя з трэкам + 3 дні без трэку
+  assert.match(panel().querySelector(".tile-sub").textContent, /^11 дзён/);
+  const card = [...panel().querySelectorAll(".card")].find((el) => el.querySelector(".card-title").textContent === "trek3");
+  assert.match(card.querySelector(".card-meta").textContent, /^1–3 студзеня 2025/);
+  assert.equal(card.querySelector(".card-nums").textContent, "3 дні");
+
+  chooseDays("multi");
+  assert.deepEqual(titles(), ["broken", "mismatch", "trek3"]);
+  chooseDays("one");
+  assert.deepEqual(titles(), ["slow", "guria", "late", "notrack"]);
+  panel().querySelector(".reset").click();
+
+  await go("#/be/trek3");
+  assert.equal(panel().querySelector(".detail .meta").textContent.includes("3 дні"), true);
+  await go("#/be");
 });

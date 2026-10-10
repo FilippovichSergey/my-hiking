@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 import requests
 
-from common import CACHE, load_config, read_json, write_json
+from common import CACHE, has_track, load_config, read_json, write_json
 
 API = "https://api.komoot.de"
 KOMOOT_DIR = CACHE / "komoot"
@@ -89,18 +89,29 @@ def main(argv=None) -> None:
     print(f"Запісаных тураў: {len(meta)}  " + ", ".join(f"{s}: {n}" for s, n in sorted(by_sport.items())))
 
     wanted = [t for t in meta if t["sport"] in sports]
-    fetched = 0
+    fetched, failed = 0, 0
     for t in wanted:
         path = KOMOOT_DIR / "tours" / f"{t['id']}.json"
         cached = read_json(path)
-        if cached and not args.refresh and cached.get("changed_at") == t.get("changed_at"):
+        if cached and not args.refresh and not cached.get("incomplete") \
+                and cached.get("changed_at") == t.get("changed_at"):
             continue
         coords = fetch_coordinates(session, t["id"], auth)
+        time.sleep(0.3)
+        if not has_track(coords):
+            # Няпоўны адказ (без каардынат) — няўдалае абнаўленне: добры трэк у кэшы ён не замяняе.
+            # Метка `incomplete` прымушае наступны запуск паспрабаваць зноў, нават калі changed_at той самы.
+            failed += 1
+            kept = bool(cached) and has_track(cached.get("coords"))
+            print(f"  ! {t['date'][:10]}  {t['name']}: Komoot аддаў трэк без каардынат — "
+                  + ("у кэшы застаецца ранейшы" if kept else "тур застаецца без трэку"))
+            write_json(path, {**(cached if kept else {**t, "coords": coords}), "incomplete": True}, compact=True)
+            continue
         write_json(path, {**t, "coords": coords}, compact=True)
         fetched += 1
         print(f"  ↓ {t['date'][:10]}  {t['name']}  ({len(coords)} кропак)")
-        time.sleep(0.3)
-    print(f"Хайкінг-тураў: {len(wanted)}, спампавана трэкаў: {fetched}. Гатова → cache/komoot/")
+    print(f"Хайкінг-тураў: {len(wanted)}, спампавана трэкаў: {fetched}"
+          + (f", без каардынат: {failed}" if failed else "") + ". Гатова → cache/komoot/")
 
 
 if __name__ == "__main__":

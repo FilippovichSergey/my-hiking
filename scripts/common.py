@@ -56,6 +56,23 @@ def load_yaml(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def has_track(coords) -> bool:
+    """Ці ёсць у туры трэк: хаця б два пункты з каардынатамі."""
+    return sum(1 for c in coords or [] if c and c[0] is not None and c[1] is not None) >= 2
+
+
+def iso_date(value) -> str | None:
+    """Дата з YAML (аб'ект date або радок ГГГГ-ММ-ДД) → ISO-радок; None, калі такога дня не існуе."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    try:
+        return date.fromisoformat(str(value).strip()).isoformat()
+    except ValueError:
+        return None
+
+
 # --- Дата тура ---------------------------------------------------------------
 
 def tour_local_datetime(iso: str, default_offset_h: float) -> datetime:

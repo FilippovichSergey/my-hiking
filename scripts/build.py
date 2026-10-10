@@ -13,12 +13,12 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from common import (CACHE, CONTENT, DOCS, load_config, load_yaml, read_json, site_photos_dir, slugify,
+from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, load_yaml, read_json, site_photos_dir, slugify,
                     tour_local_datetime, write_json)
 from geo import haversine, simplify
 
@@ -45,9 +45,10 @@ def build_tracks(slug: str, tour_ids: list, offset: float, tours_meta: dict):
     by_date: dict[str, tuple[dict, dict]] = {}
     for local, tid, tour in sorted(tours, key=lambda x: x[0]):
         meta = tours_meta.get(int(tid), tour)
-        pts = [(c[0], c[1], c[2]) for c in tour["coords"] if c[0] is not None]
-        if len(pts) < 2:
+        if not has_track(tour.get("coords")):
+            print(f"  ! {slug}: у туры {tid} няма каардынат — прапушчаны (запусціце `hike komoot --refresh`)")
             continue
+        pts = [(c[0], c[1], c[2]) for c in tour["coords"] if c and c[0] is not None and c[1] is not None]
         keep = set(simplify(pts, DETAIL_TOLERANCE_M))
         dist, prev, coords = 0.0, None, []
         for i, p in enumerate(pts):
@@ -164,6 +165,11 @@ def _pair_exists(out_dir: Path, name: str) -> bool:
     return (out_dir / f"{name}.webp").is_file() and (out_dir / f"{name}-t.webp").is_file()
 
 
+def _is_thumb(f: Path) -> bool:
+    """`x-t.webp` побач з `x.webp` — мініяцюра фота `x`, а не асобнае фота."""
+    return f.stem.endswith("-t") and f.with_name(f"{f.stem[:-2]}.webp").is_file()
+
+
 def _save_pair(out_dir: Path, base: str, big: bytes, small: bytes, run_used: set) -> str:
     """Запісвае новую версію фота пад імем з хэшам змесціва і вяртае імя (без .webp).
 
@@ -201,14 +207,15 @@ def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set,
     """Ранейшая апублікаваная версія фота `key`, калі яго крыніца больш не чытаецца.
 
     Імя бярэцца з маніфеста менавіта гэтай крыніцы: файл з падобным імем можа належаць іншаму фота
-    (напрыклад, выдаленаму, якое мела той жа slug). Без маніфеста шукаецца пара WebP з тым жа slug,
-    якая не належыць іншай крыніцы. Калі такіх пар некалькі (два фота з адным slug), прывязаць
+    (напрыклад, выдаленаму, якое мела той жа slug). Без маніфеста шукаецца фота WebP з тым жа slug,
+    якое не належыць іншай крыніцы. Калі такіх некалькі (два фота з адным slug), прывязаць
     нельга: усе яны дадаюцца ў `protect` і не выдаляюцца, пакуль крыніца не стане чытэльнай.
+    Дастаткова поўнага фота: адсутную мініяцюру ў індэксе замяняе яно само (гл. _existing_thumbs).
     """
     old = old_manifest.get(key)
     if old and old.get("name"):
         name = old["name"]
-        if _pair_exists(out_dir, name) and not {f"{name}.webp", f"{name}-t.webp"} & run_used:
+        if (out_dir / f"{name}.webp").is_file() and not {f"{name}.webp", f"{name}-t.webp"} & run_used:
             return dict(old)
         return None
     if not out_dir.is_dir():
@@ -217,7 +224,7 @@ def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set,
     others = {m.get("name") for k, m in old_manifest.items() if k != key}
     pattern = re.compile(re.escape(base) + r"(-[0-9a-f]{8})?(-\d+)*")
     cands = sorted(f.stem for f in out_dir.glob("*.webp")
-                   if pattern.fullmatch(f.stem) and f.stem not in others and _pair_exists(out_dir, f.stem)
+                   if pattern.fullmatch(f.stem) and f.stem not in others and not _is_thumb(f)
                    and not {f.name, f"{f.stem}-t.webp"} & run_used)
     if len(cands) > 1:
         print(f"  ! невядома, якое з апублікаваных фота {', '.join(cands)} належыць {key} — файлы захаваныя")
@@ -250,14 +257,11 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
             _remove(obsolete)
         return [], 0, None
 
-    by_stem: dict[str, Path] = {}
-    for f in sorted(src_dir.iterdir()):
-        ext = f.suffix.lower()
-        if not f.is_file() or ext not in PILLOW_EXT | MAGICK_EXT:
-            continue
-        prev_src = by_stem.get(f.stem.lower())
-        if prev_src is None or (ext in PILLOW_EXT and prev_src.suffix.lower() not in PILLOW_EXT):
-            by_stem[f.stem.lower()] = f
+    files = [f for f in sorted(src_dir.iterdir()) if f.is_file() and f.suffix.lower() in PILLOW_EXT | MAGICK_EXT]
+    # RAW/HEIC побач з гатовай копіяй (IMG_1.CR3 + IMG_1.jpg) — адно фота: бярэцца гатовая копія.
+    # Гатовыя файлы з адным імем (A.jpg і A.png) — розныя фота.
+    ready = {f.stem.lower() for f in files if f.suffix.lower() in PILLOW_EXT}
+    sources = [f for f in files if f.suffix.lower() in PILLOW_EXT or f.stem.lower() not in ready]
 
     prev_names = [Path(p["src"]).stem for p in (prev or {}).get("photos") or []]
     pc = cfg["photo"]
@@ -265,7 +269,7 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
     # Спачатку фота без змен: іх файлы застаюцца пад сваімі імёнамі, і новыя версіі іншых фота
     # не могуць іх заняць.
     todo = []
-    for src in by_stem.values():
+    for src in sources:
         st = src.stat()
         m = manifest.get(src.name)
         if m and m["mtime"] == st.st_mtime and m["size"] == st.st_size and _pair_exists(out_dir, m["name"]) \
@@ -314,18 +318,23 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
     if pending is None:
         _remove(obsolete)
     order = {n: i for i, n in enumerate(prev_names)}
-    if any(m.get("restored") for *_, m in entries) and all(m["name"] in order for *_, m in entries):
-        # Без маніфеста час здымкі і GPS невядомыя — парадак, вокладка і пункт з папярэдняга індэкса.
-        entries.sort(key=lambda e: order[e[2]["name"]])
+    if any(m.get("restored") for *_, m in entries):
+        # Без маніфеста час здымкі і GPS адноўленых фота невядомыя: фота з папярэдняга індэкса застаюцца
+        # ў ранейшым парадку, новыя ідуць пасля іх па часе здымкі; вокладка і пункт — таксама ранейшыя.
+        prev = prev or {}
+        known = sorted((e for e in entries if e[2]["name"] in order), key=lambda e: order[e[2]["name"]])
+        fresh = sorted((e for e in entries if e[2]["name"] not in order), key=lambda e: (e[0] or "", e[1]))
+        entries = known + fresh
         photos, cover_idx, gps = photo_list(slug, entries, cover, keep_order=True)
         if cover_idx is None:  # ранейшая вокладка — па імені файла, а не па нумары ў старым спісе
             old = (prev.get("photos") or [])[prev.get("cover") or 0:][:1]
             srcs = [p["src"] for p in photos]
             cover_idx = srcs.index(old[0]["src"]) if old and old[0]["src"] in srcs else 0
-        gps = gps or (prev.get("point") if not prev.get("lines") else None)
-        return photos, cover_idx, gps
+        # Ранейшы пункт (ён браўся з GPS аднаго з ранейшых фота) важнейшы за GPS новага фота.
+        gps = (prev.get("point") if not prev.get("lines") else None) or gps
+        return _existing_thumbs(slug, photos), cover_idx, gps
     photos, cover_idx, gps = photo_list(slug, entries, cover)
-    return photos, cover_idx or 0, gps
+    return _existing_thumbs(slug, photos), cover_idx or 0, gps
 
 
 def photo_list(slug: str, entries: list, cover: str | None, keep_order: bool = False):
@@ -360,10 +369,15 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
     Парадак, вокладка і пункт на карце бяруцца з папярэдняга hikes.json; калі яго няма —
     з маніфеста фота; калі няма і маніфеста — з саміх файлаў WebP.
     """
-    if prev and prev.get("photos") and all((DOCS / p[k]).exists() for p in prev["photos"] for k in ("src", "thumb")):
-        photos = prev["photos"]
+    kept = [p for p in (prev or {}).get("photos") or [] if (DOCS / p["src"]).exists()]
+    if kept:
+        # Страчаныя файлы прыбіраюцца са спіса; парадак, вокладка і пункт астатніх фота — ранейшыя.
+        if len(kept) < len(prev["photos"]):
+            print(f"  ! {slug}: няма файлаў {len(prev['photos']) - len(kept)} апублікаваных фота — прыбраныя з галерэі")
+        photos = _existing_thumbs(slug, kept)
         names = [Path(p["src"]).stem for p in photos]
-        prev_cover = prev.get("cover") or 0
+        old_cover = prev["photos"][prev.get("cover") or 0:][:1]  # ранейшая вокладка — па файле, а не па нумары
+        prev_cover = next((i for i, p in enumerate(kept) if old_cover and p["src"] == old_cover[0]["src"]), None)
         manifest = read_json(CACHE / "photos" / f"{slug}.json", {})
         exact = [names.index(m["name"]) for key, m in manifest.items() if cover and m.get("name") in names
                  and str(cover).lower() in (key.lower(), Path(key).stem.lower())]
@@ -372,10 +386,10 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
         # можа быць у некалькіх фота); інакш першае супадзенне.
         if exact:
             cover_idx = exact[0]
-        elif not match or prev_cover in match:
+        elif prev_cover is not None and (not match or prev_cover in match):
             cover_idx = prev_cover
         else:
-            cover_idx = match[0]
+            cover_idx = match[0] if match else 0
         gps = prev.get("point") if not prev.get("lines") else None  # пункт без трэку браўся з GPS фота
         return photos, cover_idx, gps
     out_dir = DOCS / "photos" / slug
@@ -383,15 +397,45 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
     entries = [(m["taken"], key, m) for key, m in manifest.items() if (out_dir / f"{m['name']}.webp").exists()]
     if not entries and out_dir.is_dir():  # кэша няма (напрыклад, іншы камп'ютар) — адноўліваем па файлах
         for f in sorted(out_dir.glob("*.webp")):
-            if f.stem.endswith("-t") and (out_dir / f"{f.stem[:-2]}.webp").exists():
-                continue  # гэта мініяцюра
+            if _is_thumb(f):
+                continue
             with Image.open(f) as im:
                 entries.append(("", f.stem, {"name": f.stem, "w": im.width, "h": im.height}))
     photos, cover_idx, gps = photo_list(slug, entries, cover)
-    return photos, cover_idx or 0, gps
+    return _existing_thumbs(slug, photos), cover_idx or 0, gps
+
+
+def _existing_thumbs(slug: str, photos: list) -> list:
+    """Індэкс не спасылаецца на мініяцюру, якой няма: замест яе паказваецца само фота."""
+    lost = [p for p in photos if not (DOCS / p["thumb"]).exists()]
+    if lost:
+        print(f"  ! {slug}: няма мініяцюр ({len(lost)}) — замест іх паказваюцца поўныя фота")
+    return [{**p, "thumb": p["src"]} if p in lost else p for p in photos]
 
 
 # --- Зборка ----------------------------------------------------------------------
+
+def hike_dates(slug: str, raw_start, raw_end, days: list) -> tuple[str, str]:
+    """(пачатак, канец) паходу ў ISO: `date` і `end` з YAML разам з днямі трэку; заўсёды пачатак <= канец."""
+    start = iso_date(raw_start) if raw_start else None
+    if raw_start and not start:
+        print(f"  ! {slug}: дата '{raw_start}' няправільная — не ўлічваецца")
+    # Трэк без даты (імпартаваны GPX дае 1970 год) на даты паходу не ўплывае.
+    dated = [d["date"] for d in days if d["date"] >= "2000"]
+    if dated and (not start or dated[0] < start):
+        # Паход пачынаецца не пазней за першы дзень трэку: назва тэчкі магла «з'ехаць» на дзень.
+        if start:
+            print(f"  · {slug}: date {start} пазней за першы дзень трэку — пачатак паходу {dated[0]}")
+        start = dated[0]
+    start = start or ""
+    if dated:
+        return start, max(dated[-1], start)  # даты паходу з трэкам — з тураў
+    end = iso_date(raw_end) if raw_end else None
+    if raw_end and not (end and end >= start):
+        print(f"  ! {slug}: дата заканчэння '{raw_end}' няправільная або раней за пачатак — не ўлічваецца")
+        end = None
+    return start, end or start
+
 
 def text_pair(value) -> dict:
     if isinstance(value, dict):
@@ -428,10 +472,15 @@ def main(argv=None) -> None:
         print(f"• {slug}")
         prev = previous.get(slug)
         tour_ids = h.get("komoot") or []
-        missing = [t for t in tour_ids if not (CACHE / "komoot" / "tours" / f"{t}.json").exists()]
-        if missing and prev and prev.get("track") and (DOCS / prev["track"]).exists():
-            print(f"  ! {slug}: у кэшы няма тураў {missing} — застаецца апублікаваны раней трэк "
-                  f"(запусціце `hike komoot`)")
+        cached = {t: read_json(CACHE / "komoot" / "tours" / f"{t}.json") for t in tour_ids}
+        missing = [t for t, tour in cached.items() if not tour]
+        empty = [t for t, tour in cached.items() if tour and not has_track(tour.get("coords"))]
+        if (missing or empty) and prev and prev.get("track") and (DOCS / prev["track"]).exists():
+            # Адсутны файл тура або тур без каардынат (няпоўны адказ Komoot) не выдаляе апублікаваны трэк.
+            what = " і ".join(w for w in (f"няма тураў {missing}" if missing else "",
+                                          f"туры {empty} без каардынат" if empty else "") if w)
+            print(f"  ! {slug}: у кэшы {what} — застаецца апублікаваны раней трэк "
+                  f"(запусціце `hike komoot{' --refresh' if empty else ''}`)")
             days, lines, track = prev["days"], prev["lines"], prev["track"]
         else:
             days, lines, track = build_tracks(slug, tour_ids, offset, tours_meta)
@@ -464,8 +513,7 @@ def main(argv=None) -> None:
             print(f"  ! {slug}: невядомая складанасць '{difficulty}' (easy|medium|hard|expert)")
             difficulty = None
 
-        start = h.get("date")
-        start = start.isoformat() if isinstance(start, date) else str(start or (days[0]["date"] if days else ""))
+        start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
         alts_max = [d["maxAlt"] for d in days if d["maxAlt"] is not None]
         alts_min = [d["minAlt"] for d in days if d["minAlt"] is not None]
         videos = []
@@ -476,7 +524,7 @@ def main(argv=None) -> None:
         hikes.append({
             "slug": slug,
             "date": start,
-            "end": days[-1]["date"] if days else start,
+            "end": end,
             "title": text_pair(h.get("title")),
             "region": text_pair(h.get("region")),
             "difficulty": difficulty,
