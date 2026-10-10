@@ -75,8 +75,9 @@ FOLDER_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})(?:-(\d{2})(?:(\d{2}))?)?[ _]*(.*
 def parse_folder(name: str):
     """'20230902-04_Казбегі' -> (date(2023,9,2), date(2023,9,4), 'Казбегі').
 
-    Таксама разумее '20231105-0601_...' (канец у іншым месяцы: ДД або ММДД).
-    Вяртае None, калі назва не пачынаецца з поўнай даты.
+    Таксама разумее канец у іншым месяцы ('20231130-1202_...', ММДД) і праз Новы год
+    ('20251231-0102_...'). Канец ДД, меншы за дзень пачатку, — гэта наступны месяц
+    ('20230930-02' → 2 кастрычніка). Вяртае None, калі назва не пачынаецца з поўнай даты.
     """
     m = FOLDER_RE.match(name)
     if not m:
@@ -84,16 +85,15 @@ def parse_folder(name: str):
     y, mo, d, end_a, end_b, title = m.groups()
     try:
         start = date(int(y), int(mo), int(d))
-        if end_a and end_b:  # ММДД
-            end = date(int(y), int(end_a), int(end_b))
+        if end_a and end_b:  # ММДД; канец раней за пачатак — паход праз Новы год
+            end_md = (int(end_a), int(end_b))
+            end = date(int(y) + (end_md < (start.month, start.day)), *end_md)
         elif end_a:
-            end = date(int(y), int(mo), int(end_a))
+            end = date(int(y), int(mo), int(end_a)) if int(end_a) >= start.day else                 (date(start.year + start.month // 12, start.month % 12 + 1, int(end_a)))
         else:
             end = start
     except ValueError:
         return None
-    if end < start:
-        end = start
     return start, end, title.replace("_", " ").strip()
 
 

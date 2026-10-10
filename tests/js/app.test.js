@@ -57,16 +57,18 @@ const DATA = {
     hike("broken", { be: "Аджарыя", en: "Adjara" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
     // індэкс з двума днямі, а трэк (TRACK) — з адным: стары кэш браўзера або няўдалая зборка
     hike("mismatch", { be: "Гурыя", en: "Guria" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
+    hike("late", { be: "Гурыя", en: "Guria" }),
   ],
 };
 const TRACK = { days: [{ segs: [[[42, 41, 1000, 0], [42.1, 41.1, 1100, 1]]] }] };
 
-// fetch: hikes.json адразу, трэк «slow» — па камандзе тэста, «broken» — 404.
-let releaseSlow;
+// fetch: hikes.json адразу, трэкі «slow» і «late» — па камандзе тэста, «broken» — 404.
+let releaseSlow, releaseLate;
 function fakeFetch(url) {
   const json = (data) => Promise.resolve({ ok: true, json: () => Promise.resolve(data) });
   if (url.endsWith("data/hikes.json")) return json(DATA);
   if (url.endsWith("slow.json")) return new Promise((resolve) => { releaseSlow = () => resolve({ ok: true, json: () => Promise.resolve(TRACK) }); });
+  if (url.endsWith("late.json")) return new Promise((resolve) => { releaseLate = () => resolve({ ok: true, json: () => Promise.resolve(TRACK) }); });
   if (url.endsWith("broken.json")) return Promise.resolve({ ok: false, json: () => Promise.reject(new Error("404")) });
   return json(TRACK);
 }
@@ -171,4 +173,19 @@ test("выбар дня без загружанага трэку не падае
   assert.deepEqual(errors.map(String), []);
   assert.ok(panel().querySelector(".back"), "старонка паходу засталася");
   assert.ok(panel().textContent.includes("Не ўдалося загрузіць трэк"), "паказана паведамленне пра памылку");
+});
+
+test("кнопка дня папярэдняга паходу не адмяняе адкрыццё новага (review v1.0.5, №3)", async () => {
+  await go("#/be/mismatch");
+  await waitFor(() => panel().querySelector("article h1")?.textContent === "mismatch", "старонка mismatch");
+  const oldDay = [...panel().querySelectorAll(".chip")].find((b) => b.textContent.includes("Дзень 1"));
+  assert.ok(oldDay, "ёсць кнопка дня");
+  await go("#/be/late");                       // трэк «late» яшчэ не прыйшоў, на экране старая старонка
+  assert.equal(panel().querySelector("article h1").textContent, "mismatch");
+  oldDay.click();
+  await tick(60);
+  releaseLate();
+  await waitFor(() => panel().querySelector("article h1")?.textContent === "late", "старонка late");
+  assert.equal(window.location.hash, "#/be/late");
+  assert.equal(FakeMap.last.sources.selected.data.features.length > 0, true, "на карце выбраны паход");
 });

@@ -2,7 +2,9 @@
 
 Запуск з кораня праекта:  python -B -m unittest discover -s tests -q
 """
+import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +23,11 @@ import scaffold  # noqa: E402
 
 CFG = {"site_photos_subfolders": ["Сайт", "для сайту"],
        "photo": {"max_size": 400, "quality": 70, "thumb_size": 100, "thumb_quality": 60}}
+
+
+def stem(src):
+    """'photos/h/img-2-1a2b3c4d.webp' → 'img-2': імя фота без хэша версіі."""
+    return re.sub(r"-[0-9a-f]{8}(-\d+)?$", "", Path(src).stem)
 
 
 class TempProject(unittest.TestCase):
@@ -150,14 +157,15 @@ class TestBuildPhotos(TempProject):
         self.make_photo(src, "IMG_2.jpg", (600, 800))
         photos, cover, gps = build.build_photos("hike", src, "img_2", CFG, False)
         self.assertEqual(len(photos), 2)
-        self.assertEqual(photos[cover]["src"], "photos/hike/img-2.webp")
+        self.assertEqual(stem(photos[cover]["src"]), "img-2")
         self.assertTrue(all(max(p["w"], p["h"]) <= 400 for p in photos))
         self.assertIsNone(gps)
         (src / "IMG_1.JPG").unlink()
         photos, _, _ = build.build_photos("hike", src, None, CFG, False)
         self.assertEqual(len(photos), 1)
-        self.assertEqual(sorted(f.name for f in (build.DOCS / "photos" / "hike").iterdir()),
-                         ["img-2-t.webp", "img-2.webp"])
+        files = sorted(f.name for f in (build.DOCS / "photos" / "hike").iterdir())
+        self.assertEqual(files, [Path(photos[0]["thumb"]).name, Path(photos[0]["src"]).name])
+        self.assertEqual(stem(photos[0]["src"]), "img-2")
 
     def test_no_site_folder_removes_old_output(self):
         out = build.DOCS / "photos" / "hike"
@@ -340,8 +348,8 @@ class TestReviewFixes(TempProject):
         self.assertEqual((build.DOCS / "data" / "hikes.json").read_bytes(), index_before)
         self.referenced_files_exist()  # стары індэкс па-ранейшаму спасылаецца на існуючыя файлы
         build.main([])
-        self.assertEqual([p["src"] for p in self.index()["a"]["photos"]], ["photos/a/c.webp"])
-        self.assertFalse((build.DOCS / "photos" / "a" / "a.webp").exists())  # прыбрана пасля новага індэкса
+        self.assertEqual([stem(p["src"]) for p in self.index()["a"]["photos"]], ["c"])
+        self.assertEqual(len(list((build.DOCS / "photos" / "a").iterdir())), 2)  # «a» прыбрана пасля індэкса
 
     def test_r2_2_corrupt_photo_does_not_stop_build(self):
         self.make_hike_with_photo("a", "A.jpg", (255, 0, 0))
@@ -350,7 +358,7 @@ class TestReviewFixes(TempProject):
         (b / "B.jpg").write_bytes(b"not a jpeg")             # пашкоджана пасля публікацыі
         (b / "D.jpg").write_bytes(b"also broken")            # новае і адразу пашкоджанае
         build.main([])
-        self.assertEqual([p["src"] for p in self.index()["bb"]["photos"]], ["photos/bb/b.webp"])
+        self.assertEqual([stem(p["src"]) for p in self.index()["bb"]["photos"]], ["b"])
         self.referenced_files_exist()
 
     def test_r2_3_restore_without_cache_uses_previous_index(self):
@@ -404,6 +412,228 @@ class TestReviewFixes(TempProject):
         self.assertEqual(len(a["days"]), 1)
         self.assertEqual(len(common.read_json(build.DOCS / a["track"])["days"]), 1)
         self.assertEqual(len(list((build.DOCS / "data" / "tracks").glob("*.json"))), 1)  # стары прыбраны
+
+    # --- review_2026-10-09_v1.0.3.md ---
+
+    @staticmethod
+    def exif_jpeg(path, color, size=(80, 60), taken=None, gps=None):
+        """JPEG з сапраўднымі EXIF: час здымкі і GPS [шырата, даўгата]."""
+        exif = Image.Exif()
+        if taken:
+            exif.get_ifd(0x8769)[36867] = taken
+        if gps:
+            dms = lambda v: (float(int(v)), round((v - int(v)) * 60, 6), 0.0)
+            exif.get_ifd(0x8825).update({1: "N", 2: dms(gps[0]), 3: "E", 4: dms(gps[1])})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", size, color).save(path, "JPEG", exif=exif)
+
+    def published_files(self, slug):
+        return {f.name: f.read_bytes() for f in (build.DOCS / "photos" / slug).iterdir()}
+
+    def test_r4_1_same_slug_deleted_and_corrupt_keeps_its_own_photo(self):
+        folder = self.make_hike_with_photo("a", "A t.jpg", (255, 0, 0))         # чырвонае, slug «a-t»
+        Image.new("RGB", (90, 70), (0, 0, 255)).save(folder / "A-t.jpg", "JPEG")  # сіняе, той жа slug
+        build.main([])
+        blue = [p for p in self.index()["a"]["photos"] if p["w"] == 90]
+        self.assertEqual(len(blue), 1)
+        blue_files = {Path(blue[0][k]).name for k in ("src", "thumb")}
+        blue_bytes = {n: b for n, b in self.published_files("a").items() if n in blue_files}
+        (folder / "A t.jpg").unlink()
+        (folder / "A-t.jpg").write_bytes(b"broken")
+        for argv in ([], ["--force"]):
+            build.main(argv)
+            self.assertEqual(self.index()["a"]["photos"], blue, argv)
+            self.assertEqual(self.published_files("a"), blue_bytes, argv)  # чырвонае прыбрана, сіняе цэлае
+            with Image.open(build.DOCS / blue[0]["src"]) as im:
+                self.assertEqual(im.size, (90, 70))
+                self.assertEqual(max(range(3), key=im.convert("RGB").getpixel((5, 5)).__getitem__), 2)
+
+    def test_r4_2_missing_content_folder_stops_and_keeps_site(self):
+        self.make_hike_with_photo("a", "A.jpg", (255, 0, 0))
+        build.main([])
+        before = {p: p.read_bytes() for p in build.DOCS.rglob("*") if p.is_file()}
+        self.content.rename(self.content.with_name("hikes-renamed"))
+        with self.assertRaises(SystemExit) as ctx:
+            build.main([])
+        self.assertNotIn(ctx.exception.code, (0, None))
+        self.assertEqual({p: p.read_bytes() for p in build.DOCS.rglob("*") if p.is_file()}, before)
+
+    def test_r4_3_corrupt_photo_does_not_stop_drafts(self):
+        common.write_json(build.CACHE / "komoot" / "tours.json", [])
+        common.write_json(build.CACHE / "youtube.json", [])
+        h = self.photos_root / "20250101_Hora" / "Сайт"
+        self.exif_jpeg(h / "B.jpg", (0, 0, 255), gps=[42.01, 41.01])
+        (h / "A.jpg").write_bytes(b"broken")                     # першае па парадку
+        g = self.photos_root / "20250201_Hlyb" / "Сайт"
+        g.mkdir(parents=True)
+        (g / "A.jpg").write_bytes(b"broken")                     # усе фота пашкоджаныя
+        scaffold.main([])
+        drafts = {p.name: yaml.safe_load(p.read_text(encoding="utf-8")) for p in self.content.glob("*.yaml")}
+        self.assertEqual(sorted(d["photos_folder"] for d in drafts.values()), ["20250101_Hora", "20250201_Hlyb"])
+        by_folder = {d["photos_folder"]: d for d in drafts.values()}
+        self.assertEqual(by_folder["20250101_Hora"]["location"], [42.01, 41.01])
+        self.assertFalse(by_folder["20250201_Hlyb"].get("location"))
+
+    def test_r4_failed_build_after_photo_change_keeps_photo_sizes_consistent(self):
+        a = self.make_hike_with_photo("a", "A.jpg", (255, 0, 0))   # 80×60
+        self.make_hike_with_photo("bb", "B.jpg", (0, 0, 255))
+        build.main([])
+        index_before = (build.DOCS / "data" / "hikes.json").read_bytes()
+        Image.new("RGB", (60, 80), (255, 0, 0)).save(a / "A.jpg", "JPEG")
+        (self.content / "bb.yaml").write_text("date: 2025-01-01\ntitle: [bad, yaml, value]\n", encoding="utf-8")
+        with self.assertRaises(AttributeError):
+            build.main([])
+        self.assertEqual((build.DOCS / "data" / "hikes.json").read_bytes(), index_before)
+        for h in self.index().values():  # стары індэкс адпавядае фактычным файлам
+            for p in h["photos"]:
+                with Image.open(build.DOCS / p["src"]) as im:
+                    self.assertEqual(list(im.size), [p["w"], p["h"]])
+        (self.content / "bb.yaml").write_text("date: 2025-01-01\ntitle: {be: bb}\n", encoding="utf-8")
+        build.main([])
+        p = self.index()["a"]["photos"][0]
+        self.assertEqual((p["w"], p["h"]), (60, 80))
+        self.assertEqual(len(list((build.DOCS / "photos" / "a").iterdir())), 2)  # старая версія прыбрана
+
+    def test_r4_restore_without_manifest_keeps_order_cover_and_point(self):
+        folder = self.photos_root / "20250101_H" / "Сайт"
+        self.exif_jpeg(folder / "B.jpg", (0, 0, 255), taken="2025:01:01 09:00:00")
+        self.exif_jpeg(folder / "A.jpg", (255, 0, 0), taken="2025:01:01 10:00:00", gps=[42.01, 41.01])
+        self.write_hike()
+        build.main([])
+        before = self.index()["h"]
+        self.assertEqual([stem(p["src"]) for p in before["photos"]], ["b", "a"])
+        self.assertEqual((before["cover"], before["point"]), (0, [41.01, 42.01]))
+        (build.CACHE / "photos" / "h.json").unlink()
+        for f in ("A.jpg", "B.jpg"):
+            (folder / f).write_bytes(b"broken")
+        build.main([])
+        after = self.index()["h"]
+        for k in ("photos", "cover", "point"):
+            self.assertEqual(after[k], before[k], k)
+        self.referenced_files_exist()
+
+    # --- review_2026-10-09_v1.0.4.md ---
+
+    def test_r5_1_multiline_tour_and_video_names_give_valid_draft(self):
+        self.photos_root.mkdir()
+        common.write_json(build.CACHE / "komoot" / "tours.json", [
+            {"id": 1, "name": "Hill\nSecond line", "sport": "hike", "date": "2025-01-02T06:00:00.000Z",
+             "start_point": {"lat": 41.7, "lng": 42.1}},
+            {"id": 2, "name": "Dol\r\nkey: value", "sport": "hike", "date": "2025-03-05T06:00:00.000Z",
+             "start_point": {"lat": 41.7, "lng": 42.1}}])
+        common.write_json(build.CACHE / "youtube.json", [
+            {"id": "v1", "title": "Відэа 2 студзеня 2025\nkomoot: [99]", "upload_date": "20250110"}])
+        scaffold.main([])
+        drafts = [yaml.safe_load(p.read_text(encoding="utf-8")) for p in sorted(self.content.glob("*.yaml"))]
+        self.assertEqual(len(drafts), 2)
+        by_tour = {d["komoot"][0]: d for d in drafts}
+        self.assertEqual(by_tour[1]["title"]["be"], "Hill\nSecond line")
+        self.assertEqual(by_tour[1]["youtube"], ["v1"])
+        self.assertEqual(by_tour[2]["komoot"], [2])
+        self.assertNotIn("key", by_tour[2])
+        scaffold.main([])  # наступныя запускі чытаюць чарнавікі без памылак
+        self.assertEqual(len(list(self.content.glob("*.yaml"))), 2)
+        build.main([])
+
+    def test_r5_2_exact_cover_name_wins_over_same_slug(self):
+        folder = self.photos_root / "20250101_H" / "Сайт"
+        self.exif_jpeg(folder / "A t.jpg", (255, 0, 0), taken="2025:01:01 09:00:00")
+        self.exif_jpeg(folder / "A-t.jpg", (0, 0, 255), taken="2025:01:01 10:00:00")
+        for cover, channel in (("A t.jpg", 0), ("A-t.jpg", 2), ("A t", 0)):
+            self.write_hike(cover=f'"{cover}"')
+            for argv in ([], ["--force"], []):
+                build.main(argv)
+                h = self.index()["h"]
+                with Image.open(build.DOCS / h["photos"][h["cover"]]["src"]) as im:
+                    px = im.convert("RGB").getpixel((5, 5))
+                self.assertEqual(max(range(3), key=px.__getitem__), channel, (cover, argv))
+
+    def test_r5_3_folder_across_new_year_is_one_hike(self):
+        self.assertEqual(common.parse_folder("20251231-0102_NewYear")[:2], (date(2025, 12, 31), date(2026, 1, 2)))
+        self.assertEqual(common.parse_folder("20230930-02_X")[1], date(2023, 10, 2))
+        self.assertEqual(common.parse_folder("20231231-03_Y")[1], date(2024, 1, 3))
+        (self.photos_root / "20251231-0102_NewYear" / "Сайт").mkdir(parents=True)
+        common.write_json(build.CACHE / "komoot" / "tours.json", [
+            {"id": i, "name": "Hike", "sport": "hike", "date": d, "start_point": {"lat": 41.7, "lng": 42.1}}
+            for i, d in ((1, "2025-12-31T06:00:00.000Z"), (2, "2026-01-02T06:00:00.000Z"))])
+        common.write_json(build.CACHE / "youtube.json", [])
+        scaffold.main([])
+        drafts = [yaml.safe_load(p.read_text(encoding="utf-8")) for p in self.content.glob("*.yaml")]
+        self.assertEqual(len(drafts), 1)
+        self.assertEqual((drafts[0]["photos_folder"], drafts[0]["komoot"]), ("20251231-0102_NewYear", [1, 2]))
+
+    def test_r5_prev1_same_slug_without_manifest_keeps_both_candidates(self):
+        folder = self.make_hike_with_photo("a", "A t.jpg", (255, 0, 0))
+        Image.new("RGB", (90, 70), (0, 0, 255)).save(folder / "A-t.jpg", "JPEG")
+        build.main([])
+        before = self.published_files("a")
+        (folder / "A t.jpg").unlink()
+        (folder / "A-t.jpg").write_bytes(b"broken")
+        (build.CACHE / "photos" / "a.json").unlink()
+        for argv in ([], ["--force"]):
+            build.main(argv)
+            self.assertEqual(self.index()["a"]["photos"], [], argv)  # не прывязваем адвольнае фота
+            self.assertEqual(self.published_files("a"), before, argv)  # і не выдаляем магчыма патрэбнае
+        Image.new("RGB", (90, 70), (0, 0, 255)).save(folder / "A-t.jpg", "JPEG")
+        build.main([])
+        photos = self.index()["a"]["photos"]
+        self.assertEqual([(p["w"], p["h"]) for p in photos], [(90, 70)])
+        self.assertEqual(len(self.published_files("a")), 2)
+
+    # --- review_2026-10-09_v1.0.5.md ---
+
+    def test_r6_1_invalid_exif_date_keeps_gps(self):
+        folder = self.photos_root / "20250101_H" / "Сайт"
+        self.exif_jpeg(folder / "A.jpg", (0, 0, 255), taken="0000:00:00 00:00:00", gps=[42.01, 41.01])
+        with Image.open(folder / "A.jpg") as im:
+            self.assertEqual(build._exif_info(im), (None, [41.01, 42.01]))
+        common.write_json(build.CACHE / "komoot" / "tours.json", [])
+        common.write_json(build.CACHE / "youtube.json", [])
+        scaffold.main([])
+        draft = yaml.safe_load(next(self.content.glob("*.yaml")).read_text(encoding="utf-8"))
+        self.assertEqual(draft["location"], [42.01, 41.01])
+        draft_path = next(self.content.glob("*.yaml"))
+        draft_path.write_text(draft_path.read_text(encoding="utf-8").replace("location: [42.01, 41.01]", "location:"),
+                              encoding="utf-8")  # пункт павінен узяцца з GPS фота і пры зборцы
+        build.main([])
+        self.assertEqual(next(iter(self.index().values()))["point"], [41.01, 42.01])
+
+    def test_r6_2_deleted_cover_gives_valid_cover_index(self):
+        folder = self.photos_root / "20250101_H" / "Сайт"
+        for n, hour in (("A", 9), ("B", 10), ("C", 11)):
+            self.exif_jpeg(folder / f"{n}.jpg", (255, 0, 0), taken=f"2025:01:01 {hour:02d}:00:00")
+        self.write_hike(cover="C.jpg")
+        build.main([])
+        self.assertEqual(self.index()["h"]["cover"], 2)
+        (build.CACHE / "photos" / "h.json").unlink()
+        (folder / "C.jpg").unlink()
+        for n in ("A", "B"):
+            (folder / f"{n}.jpg").write_bytes(b"broken")
+        for argv in ([], ["--force"]):
+            build.main(argv)
+            h = self.index()["h"]
+            self.assertEqual([stem(p["src"]) for p in h["photos"]], ["a", "b"], argv)
+            self.assertEqual(h["cover"], 0, argv)
+
+    def test_r6_prev2_exact_cover_kept_when_photos_disk_unavailable(self):
+        folder = self.photos_root / "20250101_H" / "Сайт"
+        self.exif_jpeg(folder / "A t.jpg", (255, 0, 0), taken="2025:01:01 09:00:00")
+        self.exif_jpeg(folder / "A-t.jpg", (0, 0, 255), taken="2025:01:01 10:00:00")
+        self.write_hike(cover='"A-t.jpg"')
+        build.main([])
+        self.assertEqual(self.index()["h"]["cover"], 1)
+        self.cfg["photos_root"] = str(self.root / "missing-disk")
+        build.main([])
+        self.assertEqual(self.index()["h"]["cover"], 1)
+        (build.CACHE / "photos" / "h.json").unlink()  # без маніфеста застаецца ранейшая вокладка
+        build.main([])
+        self.assertEqual(self.index()["h"]["cover"], 1)
+
+    def test_r6_prev3_new_year_range_ending_on_leap_day(self):
+        self.assertEqual(common.parse_folder("20231231-0229_Leap")[:2], (date(2023, 12, 31), date(2024, 2, 29)))
+        self.assertEqual(common.parse_folder("20231231-0228_X")[1], date(2024, 2, 28))
+        self.assertEqual(common.parse_folder("20240228-0229_Y")[1], date(2024, 2, 29))
+        self.assertIsNone(common.parse_folder("20241231-0229_Bad"))  # 2025 не высакосны
 
     def test_write_json_is_atomic(self):
         path = self.root / "x.json"

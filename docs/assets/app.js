@@ -319,6 +319,9 @@ async function renderDetail(hike, fit = true) {
 }
 
 function setDay(hike, day) {
+  // Пакуль загружаецца новы паход, на экране яшчэ кнопкі папярэдняга: іх націсканне не павінна
+  // адмяняць адкрыццё новага і пакідаць чужую старонку пад яго адрасам.
+  if (state.selected !== hike) return;
   state.day = day;
   renderDetail(hike, true);
 }

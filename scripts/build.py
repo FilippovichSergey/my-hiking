@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import date, datetime, timezone
@@ -106,9 +108,15 @@ def _exif_info(img: Image.Image):
     taken, gps = None, None
     try:
         exif = img.getexif()
+    except Exception:
+        return taken, gps
+    try:  # дата і GPS разбіраюцца незалежна: памылковая дата не павінна губляць каардынаты
         dt = exif.get_ifd(0x8769).get(36867) or exif.get(306)
         if dt:
             taken = datetime.strptime(str(dt).strip("\x00")[:19], "%Y:%m:%d %H:%M:%S").isoformat()
+    except Exception:
+        taken = None
+    try:
         g = exif.get_ifd(0x8825)
         if g and 2 in g and 4 in g:
             def deg(v):
@@ -139,11 +147,46 @@ def _open_image(src: Path, tmp_dir: Path) -> Image.Image:
     return img
 
 
-def _save_webp(img: Image.Image, path: Path, quality: int) -> None:
-    """Атамарны запіс: файл, на які спасылаецца апублікаваны індэкс, не застаецца напалову перапісаным."""
+def _webp_bytes(img: Image.Image, quality: int) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, "WEBP", quality=quality, method=5)
+    return buf.getvalue()
+
+
+def _write_bytes(path: Path, data: bytes) -> None:
+    """Атамарны запіс: перапынены запіс не пакідае паўфайла."""
     tmp = path.with_name(path.name + ".tmp")
-    img.save(tmp, "WEBP", quality=quality, method=5)
+    tmp.write_bytes(data)
     os.replace(tmp, path)
+
+
+def _pair_exists(out_dir: Path, name: str) -> bool:
+    return (out_dir / f"{name}.webp").is_file() and (out_dir / f"{name}-t.webp").is_file()
+
+
+def _save_pair(out_dir: Path, base: str, big: bytes, small: bytes, run_used: set) -> str:
+    """Запісвае новую версію фота пад імем з хэшам змесціва і вяртае імя (без .webp).
+
+    Існуючы файл ніколі не перазапісваецца іншымі байтамі: на яго можа спасылацца апублікаваны
+    індэкс, а зборка можа ўпасці да запісу новага. Старая версія выдаляецца пасля запісу індэкса.
+    """
+    stem = f"{base}-{hashlib.sha1(big + small).hexdigest()[:8]}"
+    n = 0
+    while True:
+        name = stem if n == 0 else f"{stem}-{n}"
+        full, thumb = out_dir / f"{name}.webp", out_dir / f"{name}-t.webp"
+        n += 1
+        if {full.name, thumb.name} & run_used:
+            continue
+        if full.exists() or thumb.exists():
+            if _pair_exists(out_dir, name) and full.read_bytes() == big and thumb.read_bytes() == small:
+                break  # гэтая ж версія ўжо апублікаваная
+            continue
+        _write_bytes(full, big)
+        _write_bytes(thumb, small)
+        break
+    run_used |= {full.name, thumb.name}
+    return name
 
 
 def _remove(paths) -> None:
@@ -154,24 +197,46 @@ def _remove(paths) -> None:
             p.unlink(missing_ok=True)
 
 
-def _published_entry(m: dict | None, name: str, full: Path, thumb: Path, st) -> dict | None:
-    """Запіс для ўжо апублікаванага WebP (з маніфеста або па самім файле), калі ён існуе."""
-    if not (full.exists() and thumb.exists()):
+def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set, protect: set) -> dict | None:
+    """Ранейшая апублікаваная версія фота `key`, калі яго крыніца больш не чытаецца.
+
+    Імя бярэцца з маніфеста менавіта гэтай крыніцы: файл з падобным імем можа належаць іншаму фота
+    (напрыклад, выдаленаму, якое мела той жа slug). Без маніфеста шукаецца пара WebP з тым жа slug,
+    якая не належыць іншай крыніцы. Калі такіх пар некалькі (два фота з адным slug), прывязаць
+    нельга: усе яны дадаюцца ў `protect` і не выдаляюцца, пакуль крыніца не стане чытэльнай.
+    """
+    old = old_manifest.get(key)
+    if old and old.get("name"):
+        name = old["name"]
+        if _pair_exists(out_dir, name) and not {f"{name}.webp", f"{name}-t.webp"} & run_used:
+            return dict(old)
         return None
-    if m and m.get("name") == name:
-        return m
-    with Image.open(full) as im:  # маніфеста няма (--force без кэша, іншы камп'ютар)
+    if not out_dir.is_dir():
+        return None
+    base = slugify(Path(key).stem)
+    others = {m.get("name") for k, m in old_manifest.items() if k != key}
+    pattern = re.compile(re.escape(base) + r"(-[0-9a-f]{8})?(-\d+)*")
+    cands = sorted(f.stem for f in out_dir.glob("*.webp")
+                   if pattern.fullmatch(f.stem) and f.stem not in others and _pair_exists(out_dir, f.stem)
+                   and not {f.name, f"{f.stem}-t.webp"} & run_used)
+    if len(cands) > 1:
+        print(f"  ! невядома, якое з апублікаваных фота {', '.join(cands)} належыць {key} — файлы захаваныя")
+        protect |= {f"{n}{s}.webp" for n in cands for s in ("", "-t")}
+        return None
+    if not cands:
+        return None
+    name = cands[0]
+    with Image.open(out_dir / f"{name}.webp") as im:
         w, h = im.size
-    return {"mtime": None, "size": None, "name": name, "w": w, "h": h,
-            "taken": datetime.fromtimestamp(st.st_mtime).isoformat(), "gps": None}
+    return {"mtime": None, "size": None, "name": name, "w": w, "h": h, "taken": "", "gps": None, "restored": True}
 
 
 def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, force: bool,
-                 pending: list | None = None):
+                 pending: list | None = None, prev: dict | None = None):
     """Вяртае (photos, cover_index, gps_першага_фота_з_GPS).
 
     Састарэлыя файлы дадаюцца ў `pending` (main выдаляе іх толькі пасля запісу новага індэкса);
-    без `pending` яны выдаляюцца адразу.
+    без `pending` яны выдаляюцца адразу. `prev` — запіс паходу з папярэдняга hikes.json.
     """
     obsolete = [] if pending is None else pending
     out_dir = DOCS / "photos" / slug
@@ -190,74 +255,103 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
         ext = f.suffix.lower()
         if not f.is_file() or ext not in PILLOW_EXT | MAGICK_EXT:
             continue
-        prev = by_stem.get(f.stem.lower())
-        if prev is None or (ext in PILLOW_EXT and prev.suffix.lower() not in PILLOW_EXT):
+        prev_src = by_stem.get(f.stem.lower())
+        if prev_src is None or (ext in PILLOW_EXT and prev_src.suffix.lower() not in PILLOW_EXT):
             by_stem[f.stem.lower()] = f
 
+    prev_names = [Path(p["src"]).stem for p in (prev or {}).get("photos") or []]
     pc = cfg["photo"]
-    entries, used_files = [], set()
+    entries, run_used, protect = [], set(), set()
+    # Спачатку фота без змен: іх файлы застаюцца пад сваімі імёнамі, і новыя версіі іншых фота
+    # не могуць іх заняць.
+    todo = []
     for src in by_stem.values():
-        name = slugify(src.stem)
-        while f"{name}.webp" in used_files or f"{name}-t.webp" in used_files:
-            name += "-1"
-        used_files |= {f"{name}.webp", f"{name}-t.webp"}
         st = src.stat()
+        m = manifest.get(src.name)
+        if m and m["mtime"] == st.st_mtime and m["size"] == st.st_size and _pair_exists(out_dir, m["name"]) \
+                and not {f"{m['name']}.webp", f"{m['name']}-t.webp"} & run_used:
+            run_used |= {f"{m['name']}.webp", f"{m['name']}-t.webp"}
+            entries.append((m["taken"], src.name, m))
+        else:
+            todo.append((src, st))
+    for src, st in todo:
         key = src.name
-        m = manifest.get(key)
-        full, thumb = out_dir / f"{name}.webp", out_dir / f"{name}-t.webp"
-        if not (m and m["mtime"] == st.st_mtime and m["size"] == st.st_size and m["name"] == name
-                and full.exists() and thumb.exists()):
-            out_dir.mkdir(parents=True, exist_ok=True)
-            try:
-                with _open_image(src, CACHE / "tmp") as raw:
-                    taken, gps = _exif_info(raw)
-                    img = ImageOps.exif_transpose(raw).convert("RGB")
-            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError,
-                    Image.DecompressionBombError) as exc:
-                # Адно пашкоджанае фота не павінна спыняць зборку ўсяго сайта.
-                kept = _published_entry(old_manifest.get(key), name, full, thumb, st)
-                if kept:
-                    print(f"  ! фота {src.name} не чытаецца ({exc}) — застаецца папярэдняя версія")
-                    manifest[key] = kept
-                    entries.append((kept["taken"], key, kept))
-                else:
-                    print(f"  ! фота {src.name} не чытаецца ({exc}) — прапушчана")
-                    used_files -= {f"{name}.webp", f"{name}-t.webp"}
-                continue
-            big = img.copy()
-            big.thumbnail((pc["max_size"], pc["max_size"]), Image.LANCZOS)
-            _save_webp(big, full, pc["quality"])
-            small = img.copy()
-            small.thumbnail((pc["thumb_size"], pc["thumb_size"]), Image.LANCZOS)
-            _save_webp(small, thumb, pc["thumb_quality"])
-            m = {"mtime": st.st_mtime, "size": st.st_size, "name": name, "w": big.width, "h": big.height,
-                 "taken": taken or datetime.fromtimestamp(st.st_mtime).isoformat(), "gps": gps}
-            manifest[key] = m
-            print(f"    фота {src.name} → {full.name} ({full.stat().st_size // 1024} КБ)")
+        try:
+            with _open_image(src, CACHE / "tmp") as raw:
+                taken, gps = _exif_info(raw)
+                img = ImageOps.exif_transpose(raw).convert("RGB")
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError,
+                Image.DecompressionBombError) as exc:
+            # Адно пашкоджанае фота не павінна спыняць зборку ўсяго сайта.
+            kept = _published_entry(out_dir, key, old_manifest, run_used, protect)
+            if kept:
+                print(f"  ! фота {src.name} не чытаецца ({exc}) — застаецца папярэдняя версія")
+                run_used |= {f"{kept['name']}.webp", f"{kept['name']}-t.webp"}
+                manifest[key] = kept
+                entries.append((kept["taken"], key, kept))
+            else:
+                print(f"  ! фота {src.name} не чытаецца ({exc}) — прапушчана")
+            continue
+        big = img.copy()
+        big.thumbnail((pc["max_size"], pc["max_size"]), Image.LANCZOS)
+        small = img.copy()
+        small.thumbnail((pc["thumb_size"], pc["thumb_size"]), Image.LANCZOS)
+        big_bytes, small_bytes = _webp_bytes(big, pc["quality"]), _webp_bytes(small, pc["thumb_quality"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        name = _save_pair(out_dir, slugify(src.stem), big_bytes, small_bytes, run_used)
+        m = {"mtime": st.st_mtime, "size": st.st_size, "name": name, "w": big.width, "h": big.height,
+             "taken": taken or datetime.fromtimestamp(st.st_mtime).isoformat(), "gps": gps}
+        manifest[key] = m
+        print(f"    фота {src.name} → {name}.webp ({len(big_bytes) // 1024} КБ)")
         entries.append((m["taken"], key, m))
 
-    manifest = {k: manifest[k] for _, k, _ in entries}
-    write_json(manifest_path, manifest)
+    # Маніфест захоўвае толькі тое, што вядома пра крыніцу: аднаўленне без маніфеста ў яго не трапляе.
+    write_json(manifest_path, {k: m for _, k, m in entries if not m.get("restored")})
     keep_files = {f"{m['name']}.webp" for *_, m in entries} | {f"{m['name']}-t.webp" for *_, m in entries}
+    keep_files |= protect
     if out_dir.is_dir():
         obsolete += [f for f in out_dir.iterdir() if f.name not in keep_files]
     if pending is None:
         _remove(obsolete)
-    return photo_list(slug, entries, cover)
+    order = {n: i for i, n in enumerate(prev_names)}
+    if any(m.get("restored") for *_, m in entries) and all(m["name"] in order for *_, m in entries):
+        # Без маніфеста час здымкі і GPS невядомыя — парадак, вокладка і пункт з папярэдняга індэкса.
+        entries.sort(key=lambda e: order[e[2]["name"]])
+        photos, cover_idx, gps = photo_list(slug, entries, cover, keep_order=True)
+        if cover_idx is None:  # ранейшая вокладка — па імені файла, а не па нумары ў старым спісе
+            old = (prev.get("photos") or [])[prev.get("cover") or 0:][:1]
+            srcs = [p["src"] for p in photos]
+            cover_idx = srcs.index(old[0]["src"]) if old and old[0]["src"] in srcs else 0
+        gps = gps or (prev.get("point") if not prev.get("lines") else None)
+        return photos, cover_idx, gps
+    photos, cover_idx, gps = photo_list(slug, entries, cover)
+    return photos, cover_idx or 0, gps
 
 
-def photo_list(slug: str, entries: list, cover: str | None):
-    """entries: [(дата здымкі, імя крыніцы, запіс маніфеста)] → (photos, cover_index, gps)."""
-    entries = sorted(entries, key=lambda e: (e[0], e[1]))
-    photos, cover_idx, gps = [], 0, None
+def photo_list(slug: str, entries: list, cover: str | None, keep_order: bool = False):
+    """entries: [(дата здымкі, імя крыніцы, запіс маніфеста)] → (photos, cover_index або None, gps)."""
+    if not keep_order:
+        entries = sorted(entries, key=lambda e: (e[0] or "", e[1]))
+    photos, gps, exact, by_slug = [], None, [], []
     for i, (_, key, m) in enumerate(entries):
         photos.append({"src": f"photos/{slug}/{m['name']}.webp", "thumb": f"photos/{slug}/{m['name']}-t.webp",
                        "w": m["w"], "h": m["h"]})
-        if cover and (str(cover).lower() in (key.lower(), Path(key).stem.lower())
-                      or slugify(Path(str(cover)).stem) == m["name"]):
-            cover_idx = i
+        if cover and str(cover).lower() in (key.lower(), Path(key).stem.lower()):
+            exact.append(i)
+        elif cover and _cover_matches_name(cover, m["name"]):
+            by_slug.append(i)
         gps = gps or m.get("gps")
-    return photos, cover_idx, gps
+    # Дакладнае імя файла важнейшае за супадзенне slug: `A t.jpg` і `A-t.jpg` даюць адзін slug.
+    if not exact and len(by_slug) > 1:
+        print(f"  ! {slug}: вокладцы «{cover}» адпавядае некалькі фота — пазначце поўнае імя файла")
+    match = exact or by_slug
+    return photos, (match[0] if match else None), gps
+
+
+def _cover_matches_name(cover, name: str) -> bool:
+    """Вокладка `IMG_2` адпавядае файлу `img-2.webp` і новай версіі `img-2-<хэш>.webp`."""
+    wanted = slugify(Path(str(cover)).stem)
+    return name == wanted or re.fullmatch(re.escape(wanted) + r"-[0-9a-f]{8}(-\d+)?", name) is not None
 
 
 def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
@@ -269,8 +363,19 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
     if prev and prev.get("photos") and all((DOCS / p[k]).exists() for p in prev["photos"] for k in ("src", "thumb")):
         photos = prev["photos"]
         names = [Path(p["src"]).stem for p in photos]
-        wanted = slugify(Path(str(cover)).stem) if cover else None
-        cover_idx = names.index(wanted) if wanted in names else (prev.get("cover") or 0)
+        prev_cover = prev.get("cover") or 0
+        manifest = read_json(CACHE / "photos" / f"{slug}.json", {})
+        exact = [names.index(m["name"]) for key, m in manifest.items() if cover and m.get("name") in names
+                 and str(cover).lower() in (key.lower(), Path(key).stem.lower())]
+        match = [i for i, n in enumerate(names) if cover and _cover_matches_name(cover, n)]
+        # Дакладнае імя з маніфеста; без яго — ранейшая вокладка, калі яна адпавядае `cover` (адзін slug
+        # можа быць у некалькіх фота); інакш першае супадзенне.
+        if exact:
+            cover_idx = exact[0]
+        elif not match or prev_cover in match:
+            cover_idx = prev_cover
+        else:
+            cover_idx = match[0]
         gps = prev.get("point") if not prev.get("lines") else None  # пункт без трэку браўся з GPS фота
         return photos, cover_idx, gps
     out_dir = DOCS / "photos" / slug
@@ -282,7 +387,8 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
                 continue  # гэта мініяцюра
             with Image.open(f) as im:
                 entries.append(("", f.stem, {"name": f.stem, "w": im.width, "h": im.height}))
-    return photo_list(slug, entries, cover)
+    photos, cover_idx, gps = photo_list(slug, entries, cover)
+    return photos, cover_idx or 0, gps
 
 
 # --- Зборка ----------------------------------------------------------------------
@@ -297,6 +403,10 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="hike build")
     ap.add_argument("--force", action="store_true", help="перагенераваць усе фота")
     args = ap.parse_args(argv)
+    if not CONTENT.is_dir():
+        # Адсутная тэчка (перайменавана, не адноўлена з копіі) — не тое ж, што пустая: без яе зборка
+        # запісала б пусты індэкс і выдаліла ўсе апублікаваныя фота і трэкі.
+        raise SystemExit(f"! Тэчка з апісаннямі паходаў не знойдзена: {CONTENT}. Сайт не змяняўся.")
     cfg = load_config()
     photos_root = Path(cfg["photos_root"])
     offset = cfg.get("default_utc_offset", 0)
@@ -333,7 +443,8 @@ def main(argv=None) -> None:
             photos, cover_idx, photo_gps = previous_photos(slug, h.get("cover"), prev)
         else:
             src_dir = site_photos_dir(photos_root / folder, cfg) if folder else None
-            photos, cover_idx, photo_gps = build_photos(slug, src_dir, h.get("cover"), cfg, args.force, pending)
+            photos, cover_idx, photo_gps = build_photos(slug, src_dir, h.get("cover"), cfg, args.force, pending,
+                                                        prev)
 
         point, bbox = None, None
         if lines:

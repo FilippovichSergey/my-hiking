@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ from common import (CACHE, CONTENT, hike_slug, load_config, load_yaml, parse_fol
 from build import PILLOW_EXT, _exif_info
 from geo import place_name, region_for_point
 from PIL import Image
+import yaml
 
 MONTHS = {
     "студзеня": 1, "лютага": 2, "сакавіка": 3, "красавіка": 4, "траўня": 5, "мая": 5, "чэрвеня": 6,
@@ -102,8 +104,13 @@ def photo_location(folder: Path, cfg: dict):
         return None
     for f in sorted(site.iterdir()):
         if f.suffix.lower() in PILLOW_EXT:
-            with Image.open(f) as img:
-                _, gps = _exif_info(img)
+            try:
+                with Image.open(f) as img:
+                    _, gps = _exif_info(img)
+            except (OSError, ValueError, Image.DecompressionBombError) as exc:
+                # Адно пашкоджанае фота не спыняе `hike new`: шукаем GPS у наступных фота.
+                print(f"  ! фота {f.name} не чытаецца ({exc}) — прапушчана")
+                continue
             if gps:
                 return [gps[1], gps[0]]
     return None
@@ -117,7 +124,13 @@ def existing_hikes():
 
 
 def yaml_str(s: str) -> str:
-    return '"' + (s or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Радок у двукоссі з экраніраваннем (JSON-радок — сапраўдны YAML), у тым ліку пераносаў радка."""
+    return json.dumps(s or "", ensure_ascii=False)
+
+
+def comment(s: str) -> str:
+    """Тэкст для YAML-каментара: перанос радка зрабіў бы з другога радка ключ YAML."""
+    return " ".join(str(s or "").split())
 
 
 def render_yaml(h: dict, today: str) -> str:
@@ -137,13 +150,13 @@ def render_yaml(h: dict, today: str) -> str:
     if h["tours"]:
         lines.append("komoot:                     # туры Komoot; туры аднаго дня аб'ядноўваюцца ў адзін дзень")
         for t in h["tours"]:
-            lines.append(f"  - {t['id']}   # {t['local'].date().isoformat()}  {t['name']}")
+            lines.append(f"  - {t['id']}   # {t['local'].date().isoformat()}  {comment(t['name'])}")
     else:
         lines.append("komoot: []")
     if h["videos"]:
         lines.append("youtube:                    # падабрана аўтаматычна, праверце")
         for v in h["videos"]:
-            lines.append(f"  - {v['id']}   # {v['title']}")
+            lines.append(f"  - {v['id']}   # {comment(v['title'])}")
     else:
         lines.append("youtube: []")
     if not h["tours"]:
@@ -265,7 +278,9 @@ def main(argv=None) -> None:
             g["location"] = photo_location(photos_root / g["folder"], cfg)
             if g["location"]:
                 g["region"] = region_for_point(*g["location"])
-        path = create_draft(hike_slug(g["start"], g["title"]), render_yaml(g, today))
+        text = render_yaml(g, today)
+        yaml.safe_load(text)  # няправільны чарнавік спыніў бы наступныя `hike new` і `hike build`
+        path = create_draft(hike_slug(g["start"], g["title"]), text)
         print(f"  + {path.name}  (дзён з трэкам: {len(g['tours'])}, відэа: {len(g['videos'])})")
     print(f"Створана чарнавікоў: {len(groups)} → content/hikes/")
 
