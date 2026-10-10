@@ -44,6 +44,7 @@ const maplibregl = {
 
 const day = (date, km) => ({ date, name: "t", distance: km, up: 100, down: 100, duration: 3600, moving: 3000,
   maxAlt: 2000, minAlt: 1000, komoot: [] });
+const stats = (distance, up) => ({ distance, up, down: 100, duration: 3600, moving: 3000, maxAlt: 2000, minAlt: 1000 });
 const hike = (slug, region, extra = {}) => ({
   slug, date: "2025-01-01", end: "2025-01-01", title: { be: slug, en: slug }, region, difficulty: null,
   stats: { distance: 10, up: 100, down: 100, duration: 3600, moving: 3000, maxAlt: 2000, minAlt: 1000 },
@@ -53,11 +54,12 @@ const hike = (slug, region, extra = {}) => ({
 const DATA = {
   hikes: [
     hike("slow", { be: "Аджарыя", en: "Adjara" }),
-    hike("guria", { be: "Гурыя", en: "Guria" }, { difficulty: "expert" }),
+    hike("guria", { be: "Гурыя", en: "Guria" }, { difficulty: "expert", stats: stats(5, 900) }),
     hike("broken", { be: "Аджарыя", en: "Adjara" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
     // індэкс з двума днямі, а трэк (TRACK) — з адным: стары кэш браўзера або няўдалая зборка
     hike("mismatch", { be: "Гурыя", en: "Guria" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
-    hike("late", { be: "Гурыя", en: "Guria" }),
+    hike("late", { be: "Гурыя", en: "Guria" }, { stats: stats(25, 300) }),
+    hike("notrack", { be: "Гурыя", en: "Guria" }, { stats: null, days: [], track: null, lines: [], bbox: null }),
   ],
 };
 const TRACK = { days: [{ segs: [[[42, 41, 1000, 0], [42.1, 41.1, 1100, 1]]] }] };
@@ -236,4 +238,49 @@ test("тэлефон: пераключальнік «Спіс / Карта» і 
   listBtn.click();
   await tick(60);
   assert.equal(layout.dataset.view, "list");
+});
+
+test("сартаванне, фільтры па нагрузцы і «Скінуць фільтры»", async () => {
+  await go("#/be");
+  const titles = () => [...panel().querySelectorAll(".card-title")].map((el) => el.textContent);
+  const choose = (selector, value) => {
+    const select = panel().querySelector(selector);
+    assert.ok([...select.options].some((o) => o.value === value), `${selector}: ёсць варыянт «${value}»`);
+    select.value = value;
+    select.dispatchEvent(new window.Event("change"));
+  };
+  const sortBy = (key) => choose("select.sort", key);
+  const DISTANCE = '.filter-row select[aria-label="Любая адлегласць"]';
+  const DAYS = '.filter-row select[aria-label="Любая працягласць"]';
+  const all = ["slow", "guria", "broken", "mismatch", "late", "notrack"];
+  assert.deepEqual(titles(), all, "спачатку новыя — парадак з даных");
+  assert.equal(panel().querySelector(".reset"), null, "без фільтраў кнопкі скіду няма");
+
+  sortBy("short");
+  assert.deepEqual(titles(), ["guria", "slow", "broken", "mismatch", "late", "notrack"]);
+  sortBy("long");
+  assert.deepEqual(titles(), ["late", "slow", "broken", "mismatch", "guria", "notrack"], "паход без трэку — у канцы");
+  sortBy("up");
+  assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack"]);
+
+  choose(DISTANCE, "mid");
+  assert.deepEqual(titles(), ["slow", "broken", "mismatch"]);
+  choose(DAYS, "multi");
+  assert.deepEqual(titles(), ["broken", "mismatch"]);
+  assert.equal(panel().querySelector(DAYS).value, "multi", "выбар захоўваецца пасля перамалёўкі");
+  choose(DISTANCE, "short");
+  assert.deepEqual(titles(), [], "нічога не падыходзіць");
+  assert.ok(panel().querySelector(".empty"));
+
+  panel().querySelector(".reset").click();
+  assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack"], "усе паходы, сартаванне застаецца");
+  assert.deepEqual([...panel().querySelectorAll(".filter-row select")].map((el) => el.value), ["", "", "", ""]);
+  assert.equal(panel().querySelector(".reset"), null);
+  assert.equal(panel().querySelector("select.sort").value, "up");
+
+  choose(DAYS, "one");
+  assert.deepEqual(titles(), ["guria", "late", "slow", "notrack"]);
+  panel().querySelector(".reset").click();
+  sortBy("new");
+  assert.deepEqual(titles(), all);
 });

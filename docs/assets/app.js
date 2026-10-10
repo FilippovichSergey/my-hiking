@@ -13,7 +13,8 @@ const MOUNTAIN_ICON = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2 2
 const body = document.getElementById("panel-body");
 const state = {
   hikes: [],
-  filters: { q: "", year: "", region: "", difficulty: "" },
+  filters: { q: "", year: "", region: "", difficulty: "", distance: "", days: "" },
+  sort: "new",
   selected: null,
   day: null,
   view: "list", // тэлефон: што на экране — панэль ("list") ці карта ("map")
@@ -118,13 +119,31 @@ function route() {
 /** Ключ рэгіёна не залежыць ад мовы інтэрфейсу, каб фільтр перажываў пераключэнне BE/EN. */
 function regionKey(hk) { return hk.region.en || hk.region.be || ""; }
 
+// Нагрузка: агульная адлегласць паходу (км) і колькасць дзён.
+const DISTANCES = { short: [0, 10], mid: [10, 20], long: [20, Infinity] };
+const DAY_COUNTS = { one: (n) => n <= 1, multi: (n) => n > 1 };
+// Паходы без трэку (без лічбаў) пры сартаванні па нагрузцы ідуць у канец.
+const byStat = (key, dir) => (a, b) =>
+  dir * ((a.stats?.[key] ?? dir * Infinity) - (b.stats?.[key] ?? dir * Infinity));
+const SORTS = {
+  new: (a, b) => b.date.localeCompare(a.date),
+  old: (a, b) => a.date.localeCompare(b.date),
+  short: byStat("distance", 1),
+  long: byStat("distance", -1),
+  up: byStat("up", -1),
+  low: byStat("up", 1),
+};
+
 function filtered() {
-  const { q, year, region, difficulty } = state.filters;
+  const { q, year, region, difficulty, distance, days } = state.filters;
   const needle = q.trim().toLowerCase();
+  const [minKm, maxKm] = DISTANCES[distance] || [];
   return state.hikes.filter((hk) =>
     (!year || hk.date.startsWith(year)) &&
     (!region || regionKey(hk) === region) &&
     (!difficulty || hk.difficulty === difficulty) &&
+    (!distance || (hk.stats != null && hk.stats.distance >= minKm && hk.stats.distance < maxKm)) &&
+    (!days || DAY_COUNTS[days](hk.days.length)) &&
     (!needle || [hk.title.be, hk.title.en, hk.region.be, hk.region.en].some((s) => s?.toLowerCase().includes(needle))));
 }
 
@@ -179,11 +198,17 @@ function renderList() {
   document.title = t("siteTitle");
   map.clearSelection();
 
-  const list = filtered();
+  const list = filtered().sort(SORTS[state.sort]);
   const years = [...new Set(state.hikes.map((hk) => hk.date.slice(0, 4)))].sort().reverse();
   const regions = [...new Map(state.hikes.filter(regionKey).map((hk) => [regionKey(hk), pick(hk.region)]))]
     .sort((a, b) => a[1].localeCompare(b[1], lang));
   const setFilter = (key, value) => { state.filters[key] = value; renderList(); };
+  const reset = Object.values(state.filters).some(Boolean)
+    ? h("button", {
+      type: "button", class: "reset",
+      onclick: () => { for (const key of Object.keys(state.filters)) state.filters[key] = ""; renderList(); },
+    }, t("reset"))
+    : null;
 
   const search = h("input", {
     class: "search", type: "search", placeholder: t("search"), "aria-label": t("search"), value: state.filters.q,
@@ -207,8 +232,17 @@ function renderList() {
       h("div", { class: "filter-row" },
         select(regions, state.filters.region, t("allRegions"), (v) => setFilter("region", v), t("allRegions")),
         select(Object.keys(DIFF_LEVEL).map((d) => [d, t("difficulty")[d]]), state.filters.difficulty, t("allDifficulty"),
-          (v) => setFilter("difficulty", v), t("allDifficulty")))),
-    h("p", { class: "result-count", "aria-live": "polite" }, t("found", list.length)),
+          (v) => setFilter("difficulty", v), t("allDifficulty"))),
+      h("div", { class: "filter-row" },
+        select(Object.keys(DISTANCES).map((d) => [d, t("distances")[d]]), state.filters.distance, t("allDistances"),
+          (v) => setFilter("distance", v), t("allDistances")),
+        select(Object.keys(DAY_COUNTS).map((d) => [d, t("dayCounts")[d]]), state.filters.days, t("allDayCounts"),
+          (v) => setFilter("days", v), t("allDayCounts")))),
+    h("div", { class: "result-row" },
+      h("p", { class: "result-count", "aria-live": "polite" }, t("found", list.length)),
+      reset,
+      h("select", { class: "sort", "aria-label": t("sort"), onchange: (e) => { state.sort = e.target.value; renderList(); } },
+        Object.keys(SORTS).map((key) => h("option", { value: key, selected: key === state.sort }, t("sorts")[key])))),
     list.length
       ? h("ul", { class: "hike-list" }, list.map(card))
       : h("p", { class: "empty" }, t("nothing")),
