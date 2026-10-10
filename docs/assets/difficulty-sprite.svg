@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <symbol id="difficulty-easy" viewBox="0 0 32 32"><path fill="currentColor" d="M3 26 L16 13 L29 26 Z"/></symbol>
+  <symbol id="difficulty-moderate" viewBox="0 0 32 32"><path fill="currentColor" d="M2 26 L11 13 L16 19 L22 8 L30 26 Z"/></symbol>
+  <symbol id="difficulty-hard" viewBox="0 0 32 32"><path fill="currentColor" d="M1 26 L7 13 L12 19 L19 5 L24 17 L27 12 L31 26 Z"/></symbol>
+  <symbol id="difficulty-very-hard" viewBox="0 0 32 32"><path fill="currentColor" d="M1 26 L5 13 L9 19 L13 8 L17 16 L22 3 L26 16 L29 10 L31 26 Z"/></symbol>
+</svg>

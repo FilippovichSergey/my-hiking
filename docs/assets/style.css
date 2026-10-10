@@ -23,6 +23,7 @@
 
   --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
   --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  --diff-easy: #237b55; --diff-medium: #9d680b; --diff-hard: #bc4e26; --diff-expert: #7d4fb2;
 
   scrollbar-color: #b9b8b1 transparent;
 }
@@ -45,6 +46,7 @@
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.4);
     --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
     --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+    --diff-easy: #57b98c; --diff-medium: #e9b35b; --diff-hard: #ff8a5c; --diff-expert: #bd9af7;
     scrollbar-color: #4a4a46 transparent;
   }
 }
@@ -67,6 +69,7 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.4);
   --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
   --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  --diff-easy: #57b98c; --diff-medium: #e9b35b; --diff-hard: #ff8a5c; --diff-expert: #bd9af7;
   scrollbar-color: #4a4a46 transparent;
 }
 :root.theme-light { color-scheme: light; }
@@ -242,10 +245,12 @@ img { display: block; max-width: 100%; }
 .card-meta { font-size: 13px; color: var(--text-2); }
 .card-nums { font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; }
 
-.diff { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-2); }
-.diff-dots { display: inline-flex; gap: 2px; }
-.diff-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--surface-3); }
-.diff-dots i.on { background: var(--text-2); }
+.diff { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-2); }
+.diff-icon { width: 20px; height: 20px; flex: 0 0 20px; margin: -4px 0; fill: currentColor; }
+.diff[data-difficulty="easy"] .diff-icon { color: var(--diff-easy); }
+.diff[data-difficulty="medium"] .diff-icon { color: var(--diff-medium); }
+.diff[data-difficulty="hard"] .diff-icon { color: var(--diff-hard); }
+.diff[data-difficulty="expert"] .diff-icon { color: var(--diff-expert); }
 
 /* ---- Старонка паходу --------------------------------------------------- */
 .back {

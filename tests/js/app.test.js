@@ -53,7 +53,7 @@ const hike = (slug, region, extra = {}) => ({
 const DATA = {
   hikes: [
     hike("slow", { be: "Аджарыя", en: "Adjara" }),
-    hike("guria", { be: "Гурыя", en: "Guria" }),
+    hike("guria", { be: "Гурыя", en: "Guria" }, { difficulty: "expert" }),
     hike("broken", { be: "Аджарыя", en: "Adjara" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
     // індэкс з двума днямі, а трэк (TRACK) — з адным: стары кэш браўзера або няўдалая зборка
     hike("mismatch", { be: "Гурыя", en: "Guria" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
@@ -188,4 +188,18 @@ test("кнопка дня папярэдняга паходу не адмяня�
   await waitFor(() => panel().querySelector("article h1")?.textContent === "late", "старонка late");
   assert.equal(window.location.hash, "#/be/late");
   assert.equal(FakeMap.last.sources.selected.data.features.length > 0, true, "на карце выбраны паход");
+});
+
+test("складанасць паказваецца іконкай са спрайта і подпісам", async () => {
+  await go("#/be");
+  const badges = [...panel().querySelectorAll(".hike-list .diff")];
+  assert.equal(badges.length, 1, "значок ёсць толькі ў паходу з зададзенай складанасцю");
+  const [badge] = badges;
+  assert.equal(badge.dataset.difficulty, "expert");
+  assert.equal(badge.textContent, "Вельмі цяжка");
+  const icon = badge.querySelector("svg.diff-icon");
+  assert.equal(icon.getAttribute("aria-hidden"), "true");
+  assert.equal(icon.querySelector("use").getAttribute("href"), "assets/difficulty-sprite.svg#difficulty-very-hard");
+  const sprite = readFileSync(new URL("docs/assets/difficulty-sprite.svg", ROOT), "utf8");
+  for (const id of ["easy", "moderate", "hard", "very-hard"]) assert.ok(sprite.includes(`id="difficulty-${id}"`), id);
 });

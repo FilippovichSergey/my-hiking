@@ -1,11 +1,13 @@
 // Галоўны модуль: даныя, маршрутызацыя (#/be/<slug>), панэль са спісам і старонкай паходу.
-import { cssVar, h } from "./dom.js";
+import { cssVar, h, s } from "./dom.js";
 import { dateRange, duration, lang, num, pick, setLang, shortDate, t } from "./i18n.js";
 import { createMap } from "./map.js";
 import { renderProfile } from "./profile.js";
 
 const PSWP_URL = "https://cdn.jsdelivr.net/npm/photoswipe@5.4.4/dist/photoswipe.esm.min.js";
 const DIFF_LEVEL = { easy: 1, medium: 2, hard: 3, expert: 4 };
+// узровень → сімвал у assets/difficulty-sprite.svg (сілуэт з 1–4 вяршынямі)
+const DIFF_ICON = { easy: "easy", medium: "moderate", hard: "hard", expert: "very-hard" };
 const MOUNTAIN_ICON = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2 27 12 9l6 10 4-6 8 14z"/></svg>';
 
 const body = document.getElementById("panel-body");
@@ -129,9 +131,9 @@ function summaryTiles(hikes) {
 
 function diffBadge(level) {
   if (!level) return null;
-  const n = DIFF_LEVEL[level];
-  return h("span", { class: "diff" },
-    h("span", { class: "diff-dots", "aria-hidden": "true" }, [1, 2, 3, 4].map((i) => h("i", { class: i <= n ? "on" : "" }))),
+  return h("span", { class: "diff", dataset: { difficulty: level } },
+    s("svg", { class: "diff-icon", viewBox: "0 0 32 32", "aria-hidden": "true" },
+      s("use", { href: `assets/difficulty-sprite.svg#difficulty-${DIFF_ICON[level]}` })),
     t("difficulty")[level]);
 }
 
