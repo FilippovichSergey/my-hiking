@@ -1,5 +1,6 @@
 // Галоўны модуль: даныя, маршрутызацыя (#/be/<slug>), панэль са спісам і старонкай паходу.
-import { cssVar, h, s } from "./dom.js";
+import { copyText, cssVar, downloadFile, h, s } from "./dom.js";
+import { gpxText } from "./gpx.js";
 import { dateRange, duration, lang, num, pick, setLang, shortDate, t } from "./i18n.js";
 import { createMap } from "./map.js";
 import { renderProfile } from "./profile.js";
@@ -295,6 +296,42 @@ async function loadTrack(hike) {
   return trackCache.get(hike.slug);
 }
 
+/** Сталая спасылка на паход (з бягучай мовай). */
+function hikeUrl(hike) { return `${location.origin}${location.pathname}#/${lang}/${hike.slug}`; }
+
+/** Дні трэку для GPX: увесь паход або выбраны дзень; пусты спіс, калі трэку для яго няма. */
+function gpxTracks(hike, track, day) {
+  const title = pick(hike.title);
+  return (track?.days || []).map((d, i) => ({ i, segs: d.segs }))
+    .filter((d) => (day == null || d.i === day) && d.segs.some((seg) => seg.length))
+    .map((d) => ({
+      segs: d.segs,
+      name: hike.days.length > 1
+        ? `${title} — ${t("day", d.i + 1)}${hike.days[d.i] ? `, ${shortDate(hike.days[d.i].date)}` : ""}`
+        : title,
+    }));
+}
+
+function downloadGpx(hike, track, day) {
+  const text = gpxText({ name: pick(hike.title), link: hikeUrl(hike), creator: t("siteTitle"), tracks: gpxTracks(hike, track, day) });
+  downloadFile(`${hike.slug}${day != null ? `-day-${day + 1}` : ""}.gpx`, text, "application/gpx+xml");
+}
+
+async function shareHike(hike, btn) {
+  const url = hikeUrl(hike);
+  if (!(await copyText(url))) {
+    window.prompt(t("copyLink"), url); // буфер абмену недаступны: спасылку можна скапіяваць уручную
+    return;
+  }
+  const label = btn.querySelector(".btn-label");
+  label.textContent = t("linkCopied");
+  setTimeout(() => { label.textContent = t("share"); }, 2000);
+}
+
+function actionIcon(path) {
+  return s("svg", { viewBox: "0 0 24 24", "aria-hidden": "true" }, s("path", { d: path }));
+}
+
 async function renderDetail(hike, fit = true) {
   const token = ++renderToken;
   state.selected = hike;
@@ -326,6 +363,15 @@ async function renderDetail(hike, fit = true) {
       pick(hike.region) ? h("span", null, pick(hike.region)) : null,
       dayCount(hike) > 1 ? h("span", null, t("days", dayCount(hike))) : null,
       diffBadge(hike.difficulty)),
+
+    h("div", { class: "actions" },
+      gpxTracks(hike, track, day).length ? h("button", {
+        type: "button", class: "link-btn", onclick: () => downloadGpx(hike, track, day),
+      }, actionIcon("M12 4v11m0 0-4-4m4 4 4-4M5 20h14"), t("downloadGpx")) : null,
+      h("button", {
+        type: "button", class: "link-btn", "aria-live": "polite", onclick: (e) => shareHike(hike, e.currentTarget),
+      }, actionIcon("M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"),
+      h("span", { class: "btn-label" }, t("share")))),
 
     dayStats ? h("div", { class: "stats" },
       tile(t("distance"), num(dayStats.distance, 1), t("km")),

@@ -32,6 +32,34 @@ export function s(tag, attrs, ...children) {
   return el;
 }
 
+/** Аддае тэкст як файл для спампоўвання. */
+export function downloadFile(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = h("a", { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** Капіюе тэкст у буфер абмену; false, калі браўзер не дазволіў. */
+export async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // без HTTPS або без дазволу: стары спосаб праз вылучаны тэкст
+    const area = h("textarea", { readonly: true, style: "position:fixed;top:0;left:0;opacity:0" });
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch {}
+    area.remove();
+    return ok;
+  }
+}
+
 export function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }

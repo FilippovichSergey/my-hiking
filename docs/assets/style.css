@@ -298,7 +298,8 @@ img { display: block; max-width: 100%; }
   cursor: zoom-in;
 }
 .detail h1 { font-size: 24px; line-height: 1.2; margin: 0 0 4px; }
-.detail .meta { color: var(--text-2); font-size: 14px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-bottom: 14px; }
+.detail .meta { color: var(--text-2); font-size: 14px; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-bottom: 10px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .detail h2 {
   font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--muted); margin: 22px 0 8px;
@@ -316,6 +317,8 @@ img { display: block; max-width: 100%; }
   font-size: 14px;
 }
 .link-btn:hover { background: var(--surface-2); }
+button.link-btn { background: none; }
+.link-btn svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* ---- Профіль вышыні ---------------------------------------------------- */
 .profile { position: relative; margin: 4px 0 0; }

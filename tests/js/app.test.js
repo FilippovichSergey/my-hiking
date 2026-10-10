@@ -312,3 +312,62 @@ test("шматдзённы паход без трэку лічыцца па да
   assert.equal(panel().querySelector(".detail .meta").textContent.includes("3 дні"), true);
   await go("#/be");
 });
+
+test("старонка паходу: «Спампаваць GPX» і «Падзяліцца»", async () => {
+  const button = (label) => [...panel().querySelectorAll(".actions button")].find((b) => b.textContent === label);
+  const blobs = [], clicks = [], copied = [], prompts = [];
+  const createObjectURL = URL.createObjectURL, anchorClick = window.HTMLAnchorElement.prototype.click;
+  URL.createObjectURL = (blob) => { blobs.push(blob); return "blob:test"; };
+  window.HTMLAnchorElement.prototype.click = function () { clicks.push({ href: this.getAttribute("href"), name: this.download }); };
+  window.prompt = (message, value) => { prompts.push(value); return null; };
+  const clipboard = (writeText) => Object.defineProperty(window.navigator, "clipboard", { value: { writeText }, configurable: true });
+  try {
+    // аднадзённы паход з трэкам
+    await go("#/be/guria");
+    await waitFor(() => button("Спампаваць GPX"), "кнопка GPX");
+    button("Спампаваць GPX").click();
+    assert.deepEqual(clicks, [{ href: "blob:test", name: "guria.gpx" }]);
+    assert.equal(blobs[0].type, "application/gpx+xml");
+    const xml = await blobs[0].text();
+    assert.ok(xml.includes("<metadata><name>guria</name><link href=\"http://localhost/#/be/guria\"/></metadata>"));
+    assert.ok(xml.includes("<trk>\n    <name>guria</name>"));
+    assert.deepEqual(xml.match(/<trkpt[^\n]*/g), [
+      '<trkpt lat="41" lon="42"><ele>1000</ele></trkpt>', '<trkpt lat="41.1" lon="42.1"><ele>1100</ele></trkpt>']);
+
+    // «Падзяліцца» капіюе спасылку на паход і на дзве секунды паведамляе пра гэта
+    clipboard(async (text) => { copied.push(text); });
+    const share = button("Падзяліцца");
+    share.click();
+    await waitFor(() => share.textContent === "Спасылка скапіявана", "паведамленне пра капіяванне");
+    assert.deepEqual(copied, ["http://localhost/#/be/guria"]);
+    // буфер абмену недаступны — спасылка паказваецца для ручнога капіявання
+    clipboard(async () => { throw new Error("denied"); });
+    share.click();
+    await waitFor(() => prompts.length === 1, "запасны спосаб");
+    assert.deepEqual(prompts, ["http://localhost/#/be/guria"]);
+
+    // выбраны дзень шматдзённага паходу: файл толькі з гэтым днём; для дня без трэку кнопкі няма
+    await go("#/be/mismatch");
+    await waitFor(() => button("Спампаваць GPX"), "кнопка GPX шматдзённага паходу");
+    const dayChip = (n) => [...panel().querySelectorAll(".chip")].find((c) => c.textContent.startsWith(`Дзень ${n}`));
+    dayChip(1).click();
+    await waitFor(() => dayChip(1)?.getAttribute("aria-pressed") === "true", "выбар дня 1");
+    button("Спампаваць GPX").click();
+    assert.equal(clicks[1].name, "mismatch-day-1.gpx");
+    assert.ok((await blobs[1].text()).includes("<name>mismatch — Дзень 1, 1 студзеня</name>"));
+    dayChip(2).click();
+    await waitFor(() => dayChip(2)?.getAttribute("aria-pressed") === "true", "выбар дня 2");
+    assert.equal(button("Спампаваць GPX"), undefined);
+    assert.ok(button("Падзяліцца"));
+
+    // паход без трэку: толькі «Падзяліцца»
+    await go("#/be/notrack");
+    await waitFor(() => button("Падзяліцца"), "кнопка падзелу без трэку");
+    assert.equal(button("Спампаваць GPX"), undefined);
+  } finally {
+    URL.createObjectURL = createObjectURL;
+    window.HTMLAnchorElement.prototype.click = anchorClick;
+    delete window.navigator.clipboard;
+    await go("#/be");
+  }
+});
