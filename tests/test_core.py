@@ -1092,6 +1092,37 @@ class TestReviewFixes(TempProject):
             self.assertIn("няма поўных копій (2) — замест іх паказваюцца мініяцюры", out.getvalue())
             self.referenced_files_exist()
 
+    # --- review_2026-10-11_v1.4.0.md ---
+
+    def test_r13_prev_corrupt_source_with_only_thumbnail_left_keeps_the_photo(self):
+        originals = {}
+        variants = [(m, argv) for m in (True, False) for argv in ([], ["--force"])]
+        for i, (with_manifest, argv) in enumerate(variants):
+            slug, name = f"h{i}", f"2025010{i + 1}_H{i}"
+            source = self.photos_root / name / "Сайт" / "A.jpg"
+            self.exif_jpeg(source, (255, 0, 0), size=(800, 600), taken="2025:01:01 09:00:00", gps=[42.01, 41.01])
+            self.write_hike(slug=slug, folder=name)
+            build.main([])
+            before = self.index()[slug]
+            photo = before["photos"][0]
+            originals[slug] = (photo["thumb"], (build.DOCS / photo["thumb"]).read_bytes(), before["point"])
+            (build.DOCS / photo["src"]).unlink()      # поўнай копіі няма, засталася мініяцюра
+            source.write_bytes(b"broken")             # і крыніца пашкоджана
+            if not with_manifest:
+                (build.CACHE / "photos" / f"{slug}.json").unlink()
+            for _ in range(2):  # дзве зборкі запар: мініяцюра не губляецца і пасля першай
+                out = io.StringIO()
+                with unittest.mock.patch("sys.stdout", out):
+                    build.main(argv)
+                index = self.index()
+                for done, (thumb, data, point) in originals.items():
+                    self.assertEqual(index[done]["photos"], [{"src": thumb, "thumb": thumb, "w": 100, "h": 75}],
+                                     (done, variants[i]))
+                    self.assertEqual((index[done]["cover"], index[done]["point"]), (0, point), (done, variants[i]))
+                    self.assertEqual((build.DOCS / thumb).read_bytes(), data, (done, variants[i]))
+                self.referenced_files_exist()
+            self.assertIn("няма поўных копій (1) — замест іх паказваюцца мініяцюры", out.getvalue())
+
     def test_index_carries_project_version(self):
         version = (common.ROOT / "VERSION").read_text(encoding="utf-8").strip()
         self.assertRegex(version, r"^\d+\.\d+\.\d+$")

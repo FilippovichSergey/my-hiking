@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -19,7 +20,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 import practical
-from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, read_version, load_yaml, read_json, site_photos_dir, slugify,
+from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, photo_name, read_version, load_yaml, read_json, site_photos_dir, slugify,
                     text_pair, tour_local_datetime, write_json)
 from geo import haversine, simplify
 
@@ -128,7 +129,8 @@ def _exif_info(img: Image.Image):
                 lat = -lat
             if g.get(3) == "W":
                 lng = -lng
-            if lat or lng:
+            # Пашкоджаны GPS (дробы 0/0 даюць NaN) і каардынаты па-за Зямлёй — гэта «няма GPS»
+            if math.isfinite(lat) and math.isfinite(lng) and abs(lat) <= 90 and abs(lng) <= 180 and (lat or lng):
                 gps = [round(lng, 5), round(lat, 5)]
     except Exception:
         pass
@@ -147,6 +149,30 @@ def _open_image(src: Path, tmp_dir: Path) -> Image.Image:
     img.load()  # чытаем у памяць, каб адразу выдаліць вялікі часовы TIFF
     tmp.unlink()
     return img
+
+
+def _exif_original(img: Image.Image) -> str | None:
+    """Час арыгінальнага здымка (DateTimeOriginal, інакш DateTimeDigitized) у ISO; None, калі яго няма.
+
+    Дата змены выявы (тэг 306, ModifyDate) сюды не падыходзіць: рэдактар ставіць у яе час захавання.
+    """
+    try:
+        ifd = img.getexif().get_ifd(0x8769)
+        for tag in (36867, 36868):
+            if ifd.get(tag):
+                return datetime.strptime(str(ifd[tag]).strip("\x00")[:19], "%Y:%m:%d %H:%M:%S").isoformat()
+    except Exception:
+        pass
+    return None
+
+
+def _shot_time(src: Path) -> str | None:
+    """Час арыгінальнага здымка з файла крыніцы; None, калі яго няма або фота не чытаецца."""
+    try:
+        with _open_image(src, CACHE / "tmp") as raw:
+            return _exif_original(raw)
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError, Image.DecompressionBombError):
+        return None
 
 
 def _webp_bytes(img: Image.Image, quality: int) -> bytes:
@@ -204,19 +230,23 @@ def _remove(paths) -> None:
             p.unlink(missing_ok=True)
 
 
-def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set, protect: set) -> dict | None:
+def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set, protect: set,
+                     prev_names: list | tuple = ()) -> dict | None:
     """Ранейшая апублікаваная версія фота `key`, калі яго крыніца больш не чытаецца.
 
     Імя бярэцца з маніфеста менавіта гэтай крыніцы: файл з падобным імем можа належаць іншаму фота
     (напрыклад, выдаленаму, якое мела той жа slug). Без маніфеста шукаецца фота WebP з тым жа slug,
     якое не належыць іншай крыніцы. Калі такіх некалькі (два фота з адным slug), прывязаць
     нельга: усе яны дадаюцца ў `protect` і не выдаляюцца, пакуль крыніца не стане чытэльнай.
-    Дастаткова поўнага фота: адсутную мініяцюру ў індэксе замяняе яно само (гл. _existing_thumbs).
+    Дастаткова аднаго файла з пары: адсутную мініяцюру ў індэксе замяняе поўнае фота, а адсутнае поўнае
+    фота — мініяцюра (гл. _usable_photos). Асірацелая мініяцюра бярэцца толькі для фота, вядомага з маніфеста
+    або з папярэдняга індэкса (`prev_names`): па адных файлах яе не адрозніць ад фота з імем на «-t».
     """
     old = old_manifest.get(key)
     if old and old.get("name"):
         name = old["name"]
-        if (out_dir / f"{name}.webp").is_file() and not {f"{name}.webp", f"{name}-t.webp"} & run_used:
+        on_disk = (out_dir / f"{name}.webp").is_file() or (out_dir / f"{name}-t.webp").is_file()
+        if on_disk and not {f"{name}.webp", f"{name}-t.webp"} & run_used:
             return dict(old)
         return None
     if not out_dir.is_dir():
@@ -227,6 +257,9 @@ def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set,
     cands = sorted(f.stem for f in out_dir.glob("*.webp")
                    if pattern.fullmatch(f.stem) and f.stem not in others and not _is_thumb(f)
                    and not {f.name, f"{f.stem}-t.webp"} & run_used)
+    cands += sorted(n for n in set(prev_names) - set(cands)
+                    if pattern.fullmatch(n) and n not in others and not (out_dir / f"{n}.webp").is_file()
+                    and (out_dir / f"{n}-t.webp").is_file() and not {f"{n}.webp", f"{n}-t.webp"} & run_used)
     if len(cands) > 1:
         print(f"  ! невядома, якое з апублікаваных фота {', '.join(cands)} належыць {key} — файлы захаваныя")
         protect |= {f"{n}{s}.webp" for n in cands for s in ("", "-t")}
@@ -234,7 +267,8 @@ def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set,
     if not cands:
         return None
     name = cands[0]
-    with Image.open(out_dir / f"{name}.webp") as im:
+    image = out_dir / f"{name}.webp"
+    with Image.open(image if image.is_file() else out_dir / f"{name}-t.webp") as im:
         w, h = im.size
     return {"mtime": None, "size": None, "name": name, "w": w, "h": h, "taken": "", "gps": None, "restored": True}
 
@@ -249,7 +283,7 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
     obsolete = [] if pending is None else pending
     out_dir = DOCS / "photos" / slug
     manifest_path = CACHE / "photos" / f"{slug}.json"
-    old_manifest = read_json(manifest_path, {})
+    old_manifest = read_manifest(slug)
     manifest = {} if force else dict(old_manifest)  # --force толькі адключае пропуск пераканвертацыі
     if not src_dir:
         if out_dir.exists():
@@ -264,7 +298,7 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
     ready = {f.stem.lower() for f in files if f.suffix.lower() in PILLOW_EXT}
     sources = [f for f in files if f.suffix.lower() in PILLOW_EXT or f.stem.lower() not in ready]
 
-    prev_names = [Path(p["src"]).stem for p in (prev or {}).get("photos") or []]
+    prev_names = [photo_name(p) for p in (prev or {}).get("photos") or []]
     pc = cfg["photo"]
     entries, run_used, protect = [], set(), set()
     # Спачатку фота без змен: іх файлы застаюцца пад сваімі імёнамі, і новыя версіі іншых фота
@@ -276,6 +310,8 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
         if m and m["mtime"] == st.st_mtime and m["size"] == st.st_size and _pair_exists(out_dir, m["name"]) \
                 and not {f"{m['name']}.webp", f"{m['name']}-t.webp"} & run_used:
             run_used |= {f"{m['name']}.webp", f"{m['name']}-t.webp"}
+            if "original" not in m:  # маніфест старой версіі: час арыгінальнага здымка дачытваецца адзін раз
+                m = manifest[src.name] = {**{k: v for k, v in m.items() if k != "shot"}, "original": _shot_time(src)}
             entries.append((m["taken"], src.name, m))
         else:
             todo.append((src, st))
@@ -284,11 +320,12 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
         try:
             with _open_image(src, CACHE / "tmp") as raw:
                 taken, gps = _exif_info(raw)
+                original = _exif_original(raw)
                 img = ImageOps.exif_transpose(raw).convert("RGB")
         except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError,
                 Image.DecompressionBombError) as exc:
             # Адно пашкоджанае фота не павінна спыняць зборку ўсяго сайта.
-            kept = _published_entry(out_dir, key, old_manifest, run_used, protect)
+            kept = _published_entry(out_dir, key, old_manifest, run_used, protect, prev_names)
             if kept:
                 print(f"  ! фота {src.name} не чытаецца ({exc}) — застаецца папярэдняя версія")
                 run_used |= {f"{kept['name']}.webp", f"{kept['name']}-t.webp"}
@@ -304,8 +341,10 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
         big_bytes, small_bytes = _webp_bytes(big, pc["quality"]), _webp_bytes(small, pc["thumb_quality"])
         out_dir.mkdir(parents=True, exist_ok=True)
         name = _save_pair(out_dir, slugify(src.stem), big_bytes, small_bytes, run_used)
+        # taken — для парадку ў галерэі (запасныя: дата змены выявы, час змены файла);
+        # original — толькі час арыгінальнага здымка: па ім вызначаецца месца на трэку
         m = {"mtime": st.st_mtime, "size": st.st_size, "name": name, "w": big.width, "h": big.height,
-             "taken": taken or datetime.fromtimestamp(st.st_mtime).isoformat(), "gps": gps}
+             "taken": taken or datetime.fromtimestamp(st.st_mtime).isoformat(), "original": original, "gps": gps}
         manifest[key] = m
         print(f"    фота {src.name} → {name}.webp ({len(big_bytes) // 1024} КБ)")
         entries.append((m["taken"], key, m))
@@ -333,9 +372,9 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
             cover_idx = srcs.index(old[0]["src"]) if old and old[0]["src"] in srcs else 0
         # Ранейшы пункт (ён браўся з GPS аднаго з ранейшых фота) важнейшы за GPS новага фота.
         gps = (prev.get("point") if not prev.get("lines") else None) or gps
-        return _existing_thumbs(slug, photos), cover_idx, gps
+        return _usable_photos(slug, photos), cover_idx, gps
     photos, cover_idx, gps = photo_list(slug, entries, cover)
-    return _existing_thumbs(slug, photos), cover_idx or 0, gps
+    return _usable_photos(slug, photos), cover_idx or 0, gps
 
 
 def photo_list(slug: str, entries: list, cover: str | None, keep_order: bool = False):
@@ -386,7 +425,7 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
         names = [Path(prev_photos[i]["src"]).stem for i, _ in usable]  # імёны ранейшых поўных фота
         # ранейшая вокладка — па месцы ў ранейшым спісе, а не па нумары ў новым
         prev_cover = next((n for n, (i, _) in enumerate(usable) if i == (prev.get("cover") or 0)), None)
-        manifest = read_json(CACHE / "photos" / f"{slug}.json", {})
+        manifest = read_manifest(slug)
         exact = [names.index(m["name"]) for key, m in manifest.items() if cover and m.get("name") in names
                  and str(cover).lower() in (key.lower(), Path(key).stem.lower())]
         match = [i for i, n in enumerate(names) if cover and _cover_matches_name(cover, n)]
@@ -401,7 +440,7 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
         gps = prev.get("point") if not prev.get("lines") else None  # пункт без трэку браўся з GPS фота
         return photos, cover_idx, gps
     out_dir = DOCS / "photos" / slug
-    manifest = read_json(CACHE / "photos" / f"{slug}.json", {})
+    manifest = read_manifest(slug)
     entries = [(m["taken"], key, m) for key, m in manifest.items() if (out_dir / f"{m['name']}.webp").exists()]
     if not entries and out_dir.is_dir():  # кэша няма (напрыклад, іншы камп'ютар) — адноўліваем па файлах
         for f in sorted(out_dir.glob("*.webp")):
@@ -410,7 +449,17 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
             with Image.open(f) as im:
                 entries.append(("", f.stem, {"name": f.stem, "w": im.width, "h": im.height}))
     photos, cover_idx, gps = photo_list(slug, entries, cover)
-    return _existing_thumbs(slug, photos), cover_idx or 0, gps
+    return _usable_photos(slug, photos), cover_idx or 0, gps
+
+
+def read_manifest(slug: str) -> dict:
+    """Маніфест фота паходу. Ранейшыя версіі маглі запісаць у яго NaN з пашкоджанага GPS — такі GPS адкідаецца."""
+    manifest = read_json(CACHE / "photos" / f"{slug}.json", {})
+    for m in manifest.values():
+        gps = m.get("gps")
+        if gps and not all(isinstance(v, (int, float)) and math.isfinite(v) for v in gps):
+            m["gps"] = None
+    return manifest
 
 
 def _usable_photo(p: dict) -> dict | None:
@@ -424,15 +473,38 @@ def _usable_photo(p: dict) -> dict | None:
         return {**p, "src": p["thumb"], "w": im.width, "h": im.height}
 
 
-def _existing_thumbs(slug: str, photos: list) -> list:
-    """Індэкс не спасылаецца на мініяцюру, якой няма: замест яе паказваецца само фота."""
-    lost = [p for p in photos if not (DOCS / p["thumb"]).exists()]
-    if lost:
-        print(f"  ! {slug}: няма мініяцюр ({len(lost)}) — замест іх паказваюцца поўныя фота")
-    return [{**p, "thumb": p["src"]} if p in lost else p for p in photos]
+def _usable_photos(slug: str, photos: list) -> list:
+    """Індэкс не спасылаецца на файл, якога няма: замест мініяцюры — само фота, замест поўнай копіі — мініяцюра."""
+    usable = [_usable_photo(p) or p for p in photos]
+    for key, text in (("thumb", "няма мініяцюр ({}) — замест іх паказваюцца поўныя фота"),
+                      ("src", "няма поўных копій ({}) — замест іх паказваюцца мініяцюры")):
+        count = sum(q[key] != p[key] for p, q in zip(photos, usable))
+        if count:
+            print(f"  ! {slug}: {text.format(count)}")
+    return usable
 
 
 # --- Зборка ----------------------------------------------------------------------
+
+def calendar_days(start: str, end: str) -> int:
+    """Колькасць каляндарных дзён паходу без трэку (як dayCount у інтэрфейсе)."""
+    try:
+        return max((datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1, 1)
+    except ValueError:
+        return 1
+
+
+def calculated_facts(prev: dict) -> dict | None:
+    """Разлік па трэку з папярэдняга індэкса без ручнога выпраўлення тыпу: яно накладваецца з актуальнага YAML."""
+    facts = prev.get("facts")
+    if not facts or facts.get("typeBy") != "author":
+        return facts
+    days = prev.get("days") or []
+    one_day = (days[0].get("facts") or {}).get("type") if len(days) == 1 else None
+    pure = {k: v for k, v in facts.items() if k not in ("typeBy", "typeCalc")}
+    pure["type"] = facts.get("typeCalc") or one_day
+    return pure
+
 
 def unique_tours(slug: str, raw) -> list:
     """Туры з поля `komoot:` без паўтораў (у ранейшым парадку): паўтор падвоіў бы трэк і статыстыку."""
@@ -519,7 +591,7 @@ def main(argv=None) -> None:
                   f"(запусціце `hike komoot{' --refresh' if empty else ''}`)")
             # Геаметрыя ранейшая, а спасылкі — толькі на туры, якія дагэтуль публічныя.
             days, lines, track = current_links(prev["days"], tours_meta), prev["lines"], prev["track"]
-            raw, facts = [], prev.get("facts")  # разлік па трэку — таксама ранейшы
+            raw, facts = [], calculated_facts(prev)  # разлік па трэку — таксама ранейшы
         else:
             days, lines, track = build_tracks(slug, tour_ids, offset, tours_meta)
             raw, facts = practical.raw_days(tour_ids, offset), None
@@ -573,11 +645,11 @@ def main(argv=None) -> None:
 
         # Звесткі аўтара; ручное выпраўленне тыпу маршруту важнейшае за разлік.
         notes, type_override = practical.parse_practical(
-            slug, h.get("practical"), days=raw, stats=stats, n_days=len(days), end=end,
-            manifest=read_json(CACHE / "photos" / f"{slug}.json", {}), photos=photos, prev=(prev or {}).get("practical"),
-            home=(cfg.get("home") or {}).get("name"))
-        if type_override:
-            facts = {**(facts or {}), "type": type_override, "typeBy": "author"}
+            slug, h.get("practical"), days=raw, stats=stats, n_days=len(days) or calendar_days(start, end), end=end,
+            manifest=read_manifest(slug), photos=photos, prev=(prev or {}).get("practical"),
+            home=(cfg.get("home") or {}).get("name"), prev_photos=(prev or {}).get("photos"))
+        if type_override:  # разлічаны тып застаецца ў typeCalc: выпраўленне можна будзе зняць і без кэша тураў
+            facts = {**(facts or {}), "typeCalc": (facts or {}).get("type"), "type": type_override, "typeBy": "author"}
         videos = []
         for vid in h.get("youtube") or []:
             v = videos_by_id.get(vid, {"id": vid})

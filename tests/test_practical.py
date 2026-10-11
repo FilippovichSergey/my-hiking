@@ -3,6 +3,8 @@
 Запуск з кораня праекта:  python -B -m unittest discover -s tests -q
 """
 import io
+import json
+import os
 import sys
 import tempfile
 import unittest
@@ -288,10 +290,31 @@ practical:
         self.assertEqual((water["days"][1], water["drunk"], water["perHour"]),
                          ({"drunk": 3.0, "taken": 2.0, "refilled": 2.0, "left": 1.0}, 5.0, 0.62))
         self.assertNotIn("праверце лічбы", out)  # узята 5 + папоўнена 2 − засталося 2 = выпіта 5
-        (self.content / "t.yaml").write_text(head + "    drunk: [2]\n    taken: 6\n    refilled: 0\n    left: 1\n", encoding="utf-8")
+        # лік за ўвесь паход (не па днях) і баланс, які не сыходзіцца
+        (self.content / "t.yaml").write_text(head + "    drunk: 2\n    taken: 6\n    refilled: 0\n    left: 1\n", encoding="utf-8")
         index, out = self.build()
-        self.assertIn("water.drunk: у спісе 1 значэнняў, а дзён у паходзе 2", out)
+        water = index["t"]["practical"]["water"]
+        self.assertEqual((water["days"], water["drunk"], water["perHour"]), ([], 2.0, 0.25))
         self.assertIn("узята + папоўнена − засталося = 5 л, а выпіта 2 л", out)
+
+    def test_r13_3_incomplete_water_list_is_unknown_total(self):
+        self.photos_root.mkdir()
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (3000, 0)))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path((3000, 0), (0, 0)))
+        head = "date: 2025-06-01\ntitle: {be: T}\nkomoot: [1, 2]\npractical:\n  water:\n"
+        for value, warns in (("[2]", True), ("[2, null]", False), ("[2, 3, 4]", True)):
+            (self.content / "t.yaml").write_text(head + f"    drunk: {value}\n", encoding="utf-8")
+            index, out = self.build()
+            water = index["t"]["practical"]["water"]
+            self.assertEqual(len(water["days"]), 2, value)
+            self.assertEqual(water["days"][0]["drunk"], 2.0, value)
+            if value == "[2, 3, 4]":  # лішні дзень адкідаецца, першыя два вядомыя
+                self.assertEqual((water["drunk"], water["perHour"]), (5.0, 0.62), value)
+            else:
+                self.assertEqual((water["days"][1]["drunk"], water["drunk"]), (None, None), value)
+                self.assertNotIn("perHour", water, value)
+                self.assertNotIn("per10km", water, value)
+            self.assertEqual("у спісе" in out, warns, value)
 
     def test_positions_kept_when_tour_cache_is_missing(self):
         self.practical_hike()
@@ -324,6 +347,390 @@ practical:
         self.assertEqual(set(parsed["notes"]), set(practical.NOTE_KEYS))
         self.assertEqual((parsed["water"]["drunk"], parsed["gettingThere"][0]["minutes"], parsed["places"][0]["type"]),
                          (2.5, 70, "shelter"))
+
+
+class TestReview140(PracticalProject):
+    """Рэгрэсійныя тэсты па review_2026-10-11_v1.4.0.md."""
+
+    def one_day(self, practical_yaml=""):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        (self.content / "h.yaml").write_text(
+            "date: 2025-06-01\ntitle: {be: H}\nphotos_folder: 20250601_H\nkomoot: [1]\n" + practical_yaml, encoding="utf-8")
+
+    def test_r13_1_wrong_field_types_warn_and_keep_the_build_going(self):
+        (self.photos_root / "20250601_H" / "Сайт").mkdir(parents=True)
+        self.add_tour(2, "2025-06-05T04:00:00Z", path((0, 0), (3000, 0)))
+        (self.content / "good.yaml").write_text("date: 2025-06-05\ntitle: {be: G}\nkomoot: [2]\n", encoding="utf-8")
+        cases = {
+            "places: 42": "places: чакаецца спіс",
+            "getting_there: 42": "getting_there: чакаецца спіс",
+            "water: {sources: 42}": "water.sources: чакаецца спіс",
+            "surface: 123": "surface: чакаецца тэкст",
+            "weather_notes: [a, b]": "weather_notes: чакаецца тэкст",
+            "places: [{type: shelter, name: 5, note: {be: 7}}]": "places[1].name: чакаецца тэкст",
+            "getting_there: [{type: taxi, to: 9}]": "getting_there[1].to: чакаецца тэкст",
+        }
+        for field, message in cases.items():
+            self.one_day(f"practical:\n  dangers: Сабакі.\n  {field}\n")
+            index, out = self.build()
+            self.assertIn(message, out, field)
+            self.assertEqual(set(index), {"h", "good"}, field)
+            self.assertEqual(index["h"]["practical"]["notes"]["dangers"]["be"], "Сабакі.", "астатнія звесткі захаваныя")
+            self.assertEqual(index["h"]["facts"]["type"], "loop", field)
+
+    def test_r13_2_file_time_is_not_a_shooting_time(self):
+        folder = self.photos_root / "20250601_H" / "Сайт"
+        folder.mkdir(parents=True)
+        Image.new("RGB", (80, 60), (10, 200, 10)).save(folder / "NoExif.jpg", "JPEG")
+        at_nine = 1748754000  # 2025-06-01 09:00 па мясцовым часе (UTC+4) — унутры часу трэку
+        os.utime(folder / "NoExif.jpg", (at_nine, at_nine))
+        self.photo("20250601_H", "Real.jpg", "2025:06:01 10:00:00")
+        self.one_day("practical:\n  water:\n    sources:\n      - {type: spring, photo: NoExif}\n      - {type: tap, photo: Real}\n")
+        index, out = self.build()
+        no_exif, real = index["h"]["practical"]["water"]["sources"]
+        self.assertIsNone(no_exif["pos"], "час змены файла — не час здымкі")
+        self.assertIsNotNone(no_exif["photo"], "фота застаецца ў запісе")
+        self.assertIn("у фота NoExif няма часу здымкі (EXIF) — пазначце time, km або at", out)
+        self.assertEqual((real["pos"]["km"], real["pos"]["time"]), (2.0, "10:00"))
+        manifest = common.read_json(build.CACHE / "photos" / "h.json")
+        self.assertEqual((manifest["NoExif.jpg"]["original"], manifest["Real.jpg"]["original"]), (None, "2025-06-01T10:00:00"))
+
+        # маніфест старой версіі (без original): час здымкі дачытваецца, фота не пераціскаюцца
+        for entry in manifest.values():
+            del entry["original"]
+        common.write_json(build.CACHE / "photos" / "h.json", manifest)
+        index, out = self.build()
+        self.assertNotIn("фота Real.jpg →", out)
+        self.assertEqual(index["h"]["practical"]["water"]["sources"][1]["pos"]["km"], 2.0)
+        self.assertEqual(common.read_json(build.CACHE / "photos" / "h.json")["Real.jpg"]["original"], "2025-06-01T10:00:00")
+
+        # стары маніфест і недаступная тэчка з фота: месца застаецца з папярэдняга індэкса
+        common.write_json(build.CACHE / "photos" / "h.json", manifest)
+        self.cfg["photos_root"] = str(self.root / "missing-disk")
+        index, out = self.build()
+        self.assertEqual(index["h"]["practical"]["water"]["sources"][1]["pos"]["km"], 2.0)
+        self.assertIn("час здымкі фота NoExif яшчэ не прачытаны", out)
+        self.assertNotIn("фота Real", out)
+
+    def test_r13_4_finish_after_midnight_is_after_sunset(self):
+        self.photos_root.mkdir()
+        self.add_tour(1, "2025-06-01T18:00:00Z", path(*SQUARE))  # мясцовы старт 22:00, фініш 02:00 наступнага дня
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+        facts = self.build()[0]["h"]["facts"]
+        self.assertEqual((facts["start"]["time"], facts["finish"]["time"]), ("22:00", "02:00"))
+        after_sunset = 24 * 60 + 2 * 60 - practical._minutes(facts["sun"]["set"])
+        self.assertAlmostEqual(facts["sun"]["left"], -after_sunset, delta=1)
+        self.assertLess(facts["sun"]["left"], -300)
+
+    def test_r13_5_removed_route_type_override_is_dropped_without_cache(self):
+        self.photos_root.mkdir()
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        head = "date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n"
+        (self.content / "h.yaml").write_text(head + "practical: {route_type: mixed}\n", encoding="utf-8")
+        facts = self.build()[0]["h"]["facts"]
+        self.assertEqual((facts["type"], facts["typeBy"], facts["typeCalc"]), ("mixed", "author", "loop"))
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        facts = self.build()[0]["h"]["facts"]  # кэша няма, выпраўленне яшчэ ў YAML
+        self.assertEqual((facts["type"], facts["typeBy"], facts["typeCalc"]), ("mixed", "author", "loop"))
+        (self.content / "h.yaml").write_text(head, encoding="utf-8")
+        facts = self.build()[0]["h"]["facts"]
+        self.assertEqual(facts["type"], "loop")
+        self.assertFalse({"typeBy", "typeCalc"} & set(facts))
+        (self.content / "h.yaml").write_text(head + "practical: {route_type: out_and_back}\n", encoding="utf-8")
+        facts = self.build()[0]["h"]["facts"]
+        self.assertEqual((facts["type"], facts["typeCalc"]), ("out_and_back", "loop"))
+
+    def test_r13_6_wrong_day_time_and_km_get_no_place(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (4000, 0)))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path((4000, 0), (0, 0)))
+        days = practical.raw_days([1, 2], 4)
+        self.assertEqual(len(days), 2)
+        bad = {
+            "day 3": ({"time": "10:00", "day": 3}, "няправільны дзень day: 3 (дзён у паходзе: 2)"),
+            "day text": ({"km": 1, "day": "2"}, "няправільны дзень day: 2"),
+            "km beyond": ({"km": 1000, "day": 2}, "кіламетр km: 1000 па-за трэкам дня 2 (0–4.0 км)"),
+            "km negative": ({"km": -1}, "па-за трэкам дня 1"),
+            "km text": ({"km": "сем"}, "няправільная адлегласць km: сем"),
+            "minutes 90": ({"time": "09:90"}, "няправільны час time: 09:90"),
+            "hours 25": ({"time": "25:00"}, "няправільны час time: 25:00"),
+            "time text": ({"time": "каля дзесяці"}, "няправільны час time"),
+            "time out of track": ({"time": "20:00"}, "час 20:00 па-за часам трэку"),
+            "time on both days": ({"time": "09:00"}, "час 09:00 ёсць у трэку некалькі разоў — дадайце day"),
+            "at text": ({"at": "тут"}, "няправільныя каардынаты at"),
+            "at range": ({"at": [141.0, 42.0]}, "няправільныя каардынаты at"),
+        }
+        for name, (spec, message) in bad.items():
+            pos, problem = practical.locate(spec, days, {})
+            self.assertIsNone(pos, name)
+            self.assertIn(message, problem or "", name)
+        good = {
+            "day 2 time": ({"time": "10:00", "day": 2}, (1, 2.0)),
+            "time on day 1": ({"time": "09:00", "day": 1}, (0, 1.0)),
+            "unquoted yaml time": ({"time": 9 * 60 + 30, "day": 1}, (0, 1.5)),   # YAML чытае 9:30 як 570
+            "km on day 2": ({"km": 3.5, "day": 2}, (1, 3.5)),
+            "km at the finish": ({"km": 4.1}, (0, 4.0)),
+        }
+        for name, (spec, want) in good.items():
+            pos, problem = practical.locate(spec, days, {})
+            self.assertIsNone(problem, name)
+            self.assertEqual((pos["day"], pos["km"]), want, name)
+
+
+class TestReview141(PracticalProject):
+    """Рэгрэсійныя тэсты па review_2026-10-11_v1.4.1.md."""
+
+    HEAD = "date: 2025-06-01\ntitle: {be: H}\nphotos_folder: 20250601_H\nkomoot: [1]\n"
+
+    def one_day(self, practical_yaml=""):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        (self.content / "h.yaml").write_text(self.HEAD + practical_yaml, encoding="utf-8")
+
+    def strict_index(self):
+        def refuse(name):
+            raise AssertionError(f"у індэксе не-JSON значэнне {name}")
+        return json.loads((build.DOCS / "data" / "hikes.json").read_text(encoding="utf-8"), parse_constant=refuse)
+
+    def test_r14_1_non_finite_numbers_are_skipped_and_index_stays_valid_json(self):
+        (self.photos_root / "20250601_H" / "Сайт").mkdir(parents=True)
+        self.one_day("""\
+practical:
+  dangers: Сабакі.
+  water: {drunk: .nan, taken: .inf, left: -.inf}
+  getting_there:
+    - {type: taxi, km: .inf, time: .inf, price: .nan}
+""")
+        index, out = self.build()
+        for message in ("water.drunk: чакаецца неадмоўны лік", "water.taken: чакаецца неадмоўны лік",
+                        "water.left: чакаецца неадмоўны лік", "getting_there[1].km: чакаецца неадмоўны лік",
+                        "getting_there.time: чакаюцца хвіліны", "getting_there[1].price: чакаецца неадмоўны лік"):
+            self.assertIn(message, out)
+        p = self.strict_index()["hikes"][0]["practical"]
+        self.assertEqual((p["water"]["drunk"], p["water"]["taken"], p["water"]["left"]), (None, None, None))
+        way = p["gettingThere"][0]
+        self.assertEqual((way["km"], way["minutes"], way["price"]), (None, None, None))
+        self.assertEqual(p["notes"]["dangers"]["be"], "Сабакі.")
+        # запіс JSON ніколі не пакідае не-JSON значэнняў і не псуе ранейшы файл
+        target = self.root / "x.json"
+        common.write_json(target, {"ok": 1})
+        with self.assertRaises(ValueError):
+            common.write_json(target, {"bad": float("nan")})
+        self.assertEqual(common.read_json(target), {"ok": 1})
+
+    def test_r14_2_trackless_multi_day_hike_counts_days_from_dates(self):
+        self.photos_root.mkdir()
+        head = "date: 2025-06-01\nend: 2025-06-02\ntitle: {be: T}\nlocation: [41, 42]\npractical:\n  water:\n"
+        results = {}
+        for value in ("[2, 3]", "[2]", "[2, null]"):
+            (self.content / "t.yaml").write_text(head + f"    drunk: {value}\n", encoding="utf-8")
+            index, out = self.build()
+            water = index["t"]["practical"]["water"]
+            results[value] = ([d["drunk"] for d in water["days"]], water["drunk"], "у спісе" in out)
+            self.assertNotIn("perHour", water, "без трэку нормаў няма")
+        self.assertEqual(results, {"[2, 3]": ([2.0, 3.0], 5.0, False), "[2]": ([2.0, None], None, True),
+                                   "[2, null]": ([2.0, None], None, False)})
+
+    def test_r14_3_ambiguous_photo_name_needs_the_full_file_name(self):
+        self.photo("20250601_H", "A.jpg", "2025:06:01 09:00:00")
+        self.photo("20250601_H", "A.jpeg", "2025:06:01 11:00:00")
+        got = {}
+        for name in ("A", "A.jpg", "A.jpeg", "a.JPEG"):
+            self.one_day(f"practical:\n  places:\n    - {{type: shelter, photo: {name}}}\n")
+            index, out = self.build()
+            place = index["h"]["practical"]["places"][0]
+            src = index["h"]["photos"][place["photo"]]["src"] if place["photo"] is not None else None
+            taken = {"09": "A.jpg", "11": "A.jpeg"}.get((place["pos"] or {}).get("time", "")[:2])
+            got[name] = (taken, place["photo"] is not None, "неадназначнае" in out)
+            if src:  # кнопка адкрывае тое самае фота, па якім вызначана месца
+                manifest = common.read_json(build.CACHE / "photos" / "h.json")
+                self.assertEqual(manifest[taken]["name"], src.split("/")[-1][:-5], name)
+        self.assertEqual(got, {"A": (None, False, True), "A.jpg": ("A.jpg", True, False),
+                               "A.jpeg": ("A.jpeg", True, False), "a.JPEG": ("A.jpeg", True, False)})
+        self.assertIn("імя фота A неадназначнае (A.jpeg, A.jpg) — пазначце поўнае імя файла",
+                      self.build_with("practical:\n  places:\n    - {type: shelter, photo: A}\n"))
+
+    def build_with(self, practical_yaml):
+        self.one_day(practical_yaml)
+        return self.build()[1]
+
+    def test_r14_4_thumbnail_fallback_keeps_the_photo_of_the_record(self):
+        self.photo("20250601_H", "A.jpg", "2025:06:01 09:00:00")
+        self.photo("20250601_H", "C-t.jpg", "2025:06:01 11:00:00")  # сапраўднае фота з імем на «-t»
+        self.one_day("practical:\n  places:\n    - {type: shelter, photo: A.jpg}\n  water:\n    sources:\n      - {type: spring, photo: C-t}\n")
+        before, _ = self.build()
+        place, source = before["h"]["practical"]["places"][0], before["h"]["practical"]["water"]["sources"][0]
+        self.assertEqual((place["photo"], source["photo"]), (0, 1))
+        (build.DOCS / before["h"]["photos"][0]["src"]).unlink()  # ад фота A засталася толькі мініяцюра
+        self.cfg["photos_root"] = str(self.root / "missing-disk")
+        after, out = self.build()
+        photos = after["h"]["photos"]
+        self.assertEqual(photos[0]["src"], photos[0]["thumb"])
+        self.assertEqual(photos[1], before["h"]["photos"][1])
+        after_place, after_source = after["h"]["practical"]["places"][0], after["h"]["practical"]["water"]["sources"][0]
+        self.assertEqual((after_place["photo"], after_place["pos"]), (0, place["pos"]))
+        self.assertEqual((after_source["photo"], after_source["pos"]), (1, source["pos"]))
+
+    def test_r14_prev2_image_modify_date_is_not_a_shooting_time(self):
+        folder = self.photos_root / "20250601_H" / "Сайт"
+        folder.mkdir(parents=True)
+        exif = Image.Exif()
+        exif[306] = "2025:06:01 09:00:00"  # ModifyDate: час захавання ў рэдактары, а не здымкі
+        Image.new("RGB", (80, 60), (10, 10, 200)).save(folder / "Edited.jpg", "JPEG", exif=exif)
+        exif = Image.Exif()
+        exif.get_ifd(0x8769)[36868] = "2025:06:01 10:00:00"  # DateTimeDigitized без DateTimeOriginal
+        Image.new("RGB", (80, 60), (200, 10, 10)).save(folder / "Scan.jpg", "JPEG", exif=exif)
+        self.one_day("practical:\n  places:\n    - {type: shelter, photo: Edited}\n    - {type: table, photo: Scan}\n")
+        index, out = self.build()
+        edited, scan = index["h"]["practical"]["places"]
+        self.assertIsNone(edited["pos"])
+        self.assertIn("у фота Edited няма часу здымкі (EXIF)", out)
+        self.assertEqual((scan["pos"]["km"], scan["pos"]["time"]), (2.0, "10:00"))
+        manifest = common.read_json(build.CACHE / "photos" / "h.json")
+        self.assertEqual((manifest["Edited.jpg"]["original"], manifest["Edited.jpg"]["taken"]), (None, "2025-06-01T09:00:00"))
+        self.assertEqual(manifest["Scan.jpg"]["original"], "2025-06-01T10:00:00")
+        # маніфест версіі 1.4.1 з полем shot (у ім магла быць дата змены выявы) перачытваецца
+        for entry in manifest.values():
+            entry["shot"] = entry.pop("original") or "2025-06-01T09:00:00"
+        common.write_json(build.CACHE / "photos" / "h.json", manifest)
+        index, out = self.build()
+        self.assertIsNone(index["h"]["practical"]["places"][0]["pos"])
+        manifest = common.read_json(build.CACHE / "photos" / "h.json")
+        self.assertEqual((manifest["Edited.jpg"]["original"], "shot" in manifest["Edited.jpg"]), (None, False))
+
+    def test_r14_prev4_night_tour_finishing_before_sunrise_has_no_daylight_margin(self):
+        self.photos_root.mkdir()
+        self.add_tour(1, "2025-06-01T20:00:00Z", path(*SQUARE))  # мясцовы час 00:00–04:00 2 чэрвеня
+        (self.content / "h.yaml").write_text("date: 2025-06-02\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+        h = self.build()[0]["h"]
+        sun = h["facts"]["sun"]
+        self.assertEqual((h["days"][0]["date"], h["facts"]["start"]["time"], h["facts"]["finish"]["time"]),
+                         ("2025-06-02", "00:00", "04:00"))
+        self.assertEqual((sun.get("night"), "left" in sun), (True, False))
+        self.assertLess(sun["rise"], sun["set"])
+
+    def test_r14_prev6_coordinates_with_a_day_stay_on_that_day(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path(*SQUARE))  # той самы маршрут назаўтра
+        days = practical.raw_days([1, 2], 4)
+        spot = [41.0 + 1000 * M, 42.0]  # паўночна-заходні вугал квадрата, 1 км ад старту
+        for spec, day in (({"at": spot}, 0), ({"at": spot, "day": 1}, 0), ({"at": spot, "day": 2}, 1)):
+            pos, problem = practical.locate(spec, days, {})
+            self.assertIsNone(problem, spec)
+            self.assertEqual((pos["day"], pos["km"]), (day, 1.0), spec)
+
+    def test_r14_broken_gps_in_exif_is_no_gps(self):
+        from PIL.TiffImagePlugin import IFDRational
+        folder = self.photos_root / "20250601_H" / "Сайт"
+        folder.mkdir(parents=True)
+        nan = IFDRational(0, 0)
+        for name, lat, lng in (("Broken.jpg", (nan, nan, nan), (nan, nan, nan)),
+                               ("Mars.jpg", (IFDRational(123), IFDRational(0), IFDRational(0)), (IFDRational(42), IFDRational(0), IFDRational(0)))):
+            exif = Image.Exif()
+            exif.get_ifd(0x8825).update({1: "N", 2: lat, 3: "E", 4: lng})
+            Image.new("RGB", (80, 60), (5, 5, 5)).save(folder / name, "JPEG", exif=exif)
+            with Image.open(folder / name) as im:
+                self.assertEqual(build._exif_info(im), (None, None), name)
+        # паход без трэку: пункт на карце з такога фота не бярэцца, індэкс застаецца правільным JSON
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nphotos_folder: 20250601_H\n", encoding="utf-8")
+        index, out = self.build()
+        self.assertIsNone(index["h"]["point"])
+        self.assertEqual(len(self.strict_index()["hikes"][0]["photos"]), 2)
+        # маніфест ранейшай версіі з NaN чытаецца, а запісваецца ўжо без яго
+        manifest_file = build.CACHE / "photos" / "h.json"
+        manifest_file.write_text(manifest_file.read_text(encoding="utf-8").replace('"gps": null', '"gps": [NaN, NaN]'), encoding="utf-8")
+        self.assertIn("NaN", manifest_file.read_text(encoding="utf-8"))
+        for root in (self.photos_root, self.root / "missing-disk"):  # звычайная зборка і зборка без тэчкі з фота
+            self.cfg["photos_root"] = str(root)
+            index, out = self.build()
+            self.assertIsNone(index["h"]["point"], root.name)
+            self.strict_index()
+        self.cfg["photos_root"] = str(self.photos_root)
+        self.build()
+        self.assertNotIn("NaN", manifest_file.read_text(encoding="utf-8"))
+
+
+class TestReview142(PracticalProject):
+    """Рэгрэсійныя тэсты па review_2026-10-11_v1.4.2.md."""
+
+    def test_r15_2_lost_manifest_keeps_the_place_and_photo_of_a_record(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        self.photo("20250601_H", "A.jpg", "2025:06:01 09:00:00")
+        self.photo("20250601_H", "B.jpg", "2025:06:01 11:00:00")
+        (self.content / "h.yaml").write_text("""\
+date: 2025-06-01
+title: {be: H}
+photos_folder: 20250601_H
+komoot: [1]
+practical:
+  places:
+    - {type: shelter, photo: A.jpg}
+  water:
+    sources:
+      - {type: spring, photo: B, water: true}
+""", encoding="utf-8")
+        before, _ = self.build()
+        place, source = before["h"]["practical"]["places"][0], before["h"]["practical"]["water"]["sources"][0]
+        self.assertEqual((place["photo"], place["pos"]["km"], source["photo"], source["pos"]["km"]), (0, 1.0, 1, 3.0))
+        # праект скланаваны: кэша няма (ні маніфеста, ні тураў), дыск з фота не падключаны
+        (build.CACHE / "photos" / "h.json").unlink()
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        self.cfg["photos_root"] = str(self.root / "missing-disk")
+        for _ in range(2):
+            after, out = self.build()
+            self.assertNotIn("practical:", out)
+            for key in ("photos", "track", "practical"):
+                self.assertEqual(after["h"][key], before["h"][key], key)
+
+    def test_r15_2_reordered_gallery_and_really_deleted_photo(self):
+        a, b = ({"src": f"photos/h/{n}-11111111.webp", "thumb": f"photos/h/{n}-11111111-t.webp", "w": 4, "h": 3} for n in "ab")
+        pos = {"day": 0, "km": 1.0, "at": [42.0, 41.009], "alt": 1200, "time": "09:00"}
+        prev = {"places": [{"ref": "photo::a.jpg", "pos": pos, "photo": 0}], "water": None}
+        block = {"places": [{"type": "shelter", "photo": "A.jpg"}]}
+
+        def parse(photos):
+            out = io.StringIO()
+            with unittest.mock.patch("sys.stdout", out):
+                parsed, _ = practical.parse_practical("h", block, days=[], stats=None, n_days=1, end="2025-06-01",
+                                                      manifest={}, photos=photos, prev=prev, prev_photos=[a, b])
+            return parsed["places"][0], out.getvalue()
+
+        place, out = parse([b, a])  # парадак галерэі змяніўся
+        self.assertEqual((place["photo"], place["pos"], out), (1, pos, ""))
+        place, out = parse([b])     # фота сапраўды прыбрана з галерэі
+        self.assertEqual((place["photo"], place["pos"]), (None, None))
+        self.assertIn("фота A.jpg няма сярод фота паходу", out)
+
+    def test_r15_3_time_in_a_long_break_between_tours_has_no_place(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (2000, 0)), duration=3600)    # 08:00–12:00
+        self.add_tour(2, "2025-06-01T13:00:00Z", path((20000, 0), (22000, 0)))              # 17:00–21:00
+        days = practical.raw_days([1, 2], 4)
+        self.assertEqual((len(days), len(days[0]["segs"])), (1, 2))
+        shot = {"Gap.jpg": "2025-06-01T14:30:00", "In.jpg": "2025-06-01T18:00:00", "Edge.jpg": "2025-06-01T12:20:00"}
+        for spec in ({"time": "14:30"}, {"photo": "Gap.jpg"}):
+            pos, problem = practical.locate(spec, days, shot)
+            self.assertIsNone(pos, spec)
+            self.assertIn("па-за часам трэку", problem, spec)
+        good = {"first tour": ({"time": "10:00"}, 1.0), "second tour": ({"time": "18:00"}, 2.5),
+                "photo in the second tour": ({"photo": "In.jpg"}, 2.5),
+                "20 minutes after the first tour": ({"photo": "Edge.jpg"}, 2.0),
+                "20 minutes before the second tour": ({"time": "16:40"}, 2.0)}
+        for name, (spec, km) in good.items():
+            pos, problem = practical.locate(spec, days, shot)
+            self.assertIsNone(problem, name)
+            self.assertAlmostEqual(pos["km"], km, delta=0.05, msg=name)
+
+    def test_r15_4_time_after_midnight_on_a_night_route(self):
+        self.add_tour(1, "2025-06-01T18:00:00Z", path(*SQUARE))  # мясцовы час 22:00–02:00 наступнага дня
+        days = practical.raw_days([1], 4)
+        self.assertEqual([d["date"] for d in days], ["2025-06-01"])
+        for spec, km, clock in (({"time": "01:00", "day": 1}, 3.0, "01:00"), ({"time": "23:00"}, 1.0, "23:00"),
+                                ({"time": 60}, 3.0, "01:00")):  # YAML чытае 1:00 без двукосся як 60
+            pos, problem = practical.locate(spec, days, {})
+            self.assertIsNone(problem, spec)
+            self.assertEqual((pos["km"], pos["time"], pos["day"]), (km, clock, 0), spec)
+        for spec in ({"time": "05:00"}, {"time": "20:00", "day": 1}):
+            pos, problem = practical.locate(spec, days, {})
+            self.assertIsNone(pos, spec)
+            self.assertIn("па-за часам трэку", problem, spec)
 
 
 if __name__ == "__main__":

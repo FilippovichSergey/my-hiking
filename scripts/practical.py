@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import bisect
 import math
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from common import CACHE, has_track, iso_date, read_json, text_pair, tour_local_datetime
+from common import CACHE, has_track, iso_date, photo_name, read_json, text_pair, tour_local_datetime
 from geo import haversine
 
 ROUTE_TYPES = ("loop", "out_and_back", "point_to_point", "mixed")
@@ -137,8 +138,8 @@ def hike_route_type(days: list[dict], day_types: list) -> str | None:
 
 # --- Сонца ------------------------------------------------------------------------
 
-def sun_times(day: date, lat: float, lng: float, tz) -> tuple[str, str] | None:
-    """(узыход, заход) мясцовым часам «ГГ:ХХ» паводле ўраўнення ўзыходу сонца; None для палярнага дня або ночы.
+def sun_moments(day: date, lat: float, lng: float, tz) -> tuple[datetime, datetime] | None:
+    """(узыход, заход) як моманты мясцовага часу паводле ўраўнення ўзыходу сонца; None для палярнага дня або ночы.
 
     Астранамічны разлік без уліку рэльефу: у гарах сонца хаваецца за хрыбет раней.
     """
@@ -155,11 +156,20 @@ def sun_times(day: date, lat: float, lng: float, tz) -> tuple[str, str] | None:
         return None
     w = math.degrees(math.acos(cos_w)) / 360
 
-    def clock(julian: float) -> str:
-        utc = datetime(2000, 1, 1, 12, tzinfo=timezone.utc) + timedelta(days=julian - 2451545.0)
-        return (utc.astimezone(tz) + timedelta(seconds=30)).strftime("%H:%M")  # да бліжэйшай хвіліны
+    def moment(julian: float) -> datetime:
+        return (datetime(2000, 1, 1, 12, tzinfo=timezone.utc) + timedelta(days=julian - 2451545.0)).astimezone(tz)
 
-    return clock(transit - w), clock(transit + w)
+    return moment(transit - w), moment(transit + w)
+
+
+def _hhmm(moment: datetime) -> str:
+    return (moment + timedelta(seconds=30)).strftime("%H:%M")  # да бліжэйшай хвіліны
+
+
+def sun_times(day: date, lat: float, lng: float, tz) -> tuple[str, str] | None:
+    """(узыход, заход) мясцовым часам «ГГ:ХХ»."""
+    moments = sun_moments(day, lat, lng, tz)
+    return (_hhmm(moments[0]), _hhmm(moments[1])) if moments else None
 
 
 def _minutes(clock: str) -> int:
@@ -209,11 +219,15 @@ def day_facts(day: dict, stats: dict) -> dict:
     """Разлік па трэку для аднаго дня: тып, старт і фініш, светлавы дзень, тэмп, рэльеф."""
     pts = _points(day)
     facts = {"type": route_type(pts), "start": _end(pts[0], day["tz"]), "finish": _end(pts[-1], day["tz"])}
-    sun = sun_times(date.fromisoformat(day["date"]), pts[0][0], pts[0][1], day["tz"])
+    sun = sun_moments(date.fromisoformat(day["date"]), pts[0][0], pts[0][1], day["tz"])
     if sun:
-        facts["sun"] = {"rise": sun[0], "set": sun[1]}
-        if facts["finish"]["time"]:  # колькі хвілін святла заставалася пасля фінішу (мінус — фініш у цемры)
-            facts["sun"]["left"] = _minutes(sun[1]) - _minutes(facts["finish"]["time"])
+        facts["sun"] = {"rise": _hhmm(sun[0]), "set": _hhmm(sun[1])}
+        if pts[-1][3] is not None and pts[-1][3] < sun[0].timestamp():
+            facts["sun"]["night"] = True  # начны выхад: фініш яшчэ да ўзыходу сонца
+        elif pts[-1][3] is not None:
+            # Хвілін святла пасля фінішу; мінус — фініш пасля заходу. Параўноўваюцца моманты часу з датай,
+            # таму фініш пасля поўначы — гэта «пасля заходу», а не «амаль цэлы дзень святла».
+            facts["sun"]["left"] = round((sun[1].timestamp() - pts[-1][3]) / 60)
     facts.update(_pace(stats))
     up, down = _steepest(pts)
     if up:
@@ -248,73 +262,125 @@ def _position(days: list[dict], di: int, point: tuple, off: float | None = None)
 
 
 def _by_time(days: list[dict], ts: float, only_day: int | None = None) -> dict | None:
+    """Пункт трэку, бліжэйшы па часе. Кожны адрэзак (тур) дня разглядаецца асобна: момант у доўгім
+    перапынку паміж турамі не мае месца на трэку — дапускаецца толькі PHOTO_TOLERANCE_S ад межаў запісу."""
     best = None
     for di, day in enumerate(days):
         if only_day is not None and di != only_day:
             continue
-        pts = [p for p in _points(day) if p[3] is not None]
-        if not pts or not pts[0][3] - PHOTO_TOLERANCE_S <= ts <= pts[-1][3] + PHOTO_TOLERANCE_S:
-            continue
-        times = [p[3] for p in pts]
-        i = min(bisect.bisect_left(times, ts), len(pts) - 1)
-        if i and ts - times[i - 1] < times[i] - ts:
-            i -= 1
-        if best is None or abs(times[i] - ts) < best[0]:
-            best = (abs(times[i] - ts), di, pts[i])
+        for seg in day["segs"]:
+            pts = [p for p in seg if p[3] is not None]
+            if not pts or not pts[0][3] - PHOTO_TOLERANCE_S <= ts <= pts[-1][3] + PHOTO_TOLERANCE_S:
+                continue
+            times = [p[3] for p in pts]
+            i = min(bisect.bisect_left(times, ts), len(pts) - 1)
+            if i and ts - times[i - 1] < times[i] - ts:
+                i -= 1
+            if best is None or abs(times[i] - ts) < best[0]:
+                best = (abs(times[i] - ts), di, pts[i])
     return _position(days, best[1], best[2]) if best else None
 
 
-def locate(spec: dict, days: list[dict], photo_times: dict[str, str]) -> tuple[dict | None, str | None]:
+_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
+
+def locate(spec: dict, days: list[dict], photo_times: dict) -> tuple[dict | None, str | None]:
     """Месца на трэку паводле `photo`, `time`, `km` або `at`: (месца, прычына няўдачы).
 
-    photo — імя фота з тэчкі «Сайт» (месца — па часе здымкі); time — «ГГ:ХХ» (і `day`, калі дзён некалькі);
-    km — адлегласць ад пачатку дня па трэку; at — [шырата, даўгата] (шукаецца бліжэйшы пункт трэку).
+    photo — імя фота з тэчкі «Сайт» (месца — па сапраўдным часе здымкі з EXIF); time — «ГГ:ХХ» (і `day`, калі
+    дзён некалькі); km — адлегласць ад пачатку дня па трэку; at — [шырата, даўгата] (бліжэйшы пункт трэку).
+    Памылковае значэнне не падмяняецца «бліжэйшым магчымым»: запіс застаецца без месца, з папярэджаннем.
+    photo_times: імя фота → час здымкі з EXIF або None, калі часу ў фота няма.
     """
     if _ref(spec) is None:
         return None, None  # месца не пазначана — запіс паказваецца без кропкі
     if not days:
         return None, "няма трэку"
-    day = spec.get("day")
-    only = int(day) - 1 if isinstance(day, int) and 1 <= day <= len(days) else None
+    day, only = spec.get("day"), None
+    if day is not None and day != "":
+        if isinstance(day, bool) or not isinstance(day, int) or not 1 <= day <= len(days):
+            return None, f"няправільны дзень day: {day} (дзён у паходзе: {len(days)})"
+        only = day - 1
     tz = days[0]["tz"]
-    if spec.get("at"):
+    if spec.get("at") is not None:
         try:
             lat, lng = float(spec["at"][0]), float(spec["at"][1])
-        except (TypeError, ValueError, IndexError):
-            return None, f"няправільныя каардынаты at: {spec['at']}"
-        d, di, point = min(((haversine(lat, lng, p[0], p[1]), di, p) for di, dd in enumerate(days) for p in _points(dd)),
-                           key=lambda x: x[0])
+            if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+                raise ValueError
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None, f"няправільныя каардынаты at: {spec['at']} (трэба [шырата, даўгата])"
+        d, di, point = min(((haversine(lat, lng, p[0], p[1]), di, p) for di, dd in enumerate(days)
+                            if only is None or di == only for p in _points(dd)), key=lambda x: x[0])
         pos = _position(days, di, point, d)
         pos["at"] = [round(lng, 5), round(lat, 5)]  # кропка на карце — сапраўднае месца, а не праекцыя на трэк
         return pos, None
-    if spec.get("photo"):
-        taken = photo_times.get(str(spec["photo"]).lower()) or photo_times.get(Path(str(spec["photo"])).stem.lower())
-        if not taken:
-            return None, f"фота {spec['photo']} няма сярод фота паходу або ў яго няма часу здымкі"
-        pos = _by_time(days, datetime.fromisoformat(taken).replace(tzinfo=tz).timestamp())
+    if spec.get("photo") is not None:
+        key, candidates = find_photo(spec["photo"], photo_times)
+        if key is None:
+            return None, photo_problem(spec["photo"], candidates)
+        if not photo_times[key]:
+            return None, f"у фота {spec['photo']} няма часу здымкі (EXIF) — пазначце time, km або at"
+        pos = _by_time(days, datetime.fromisoformat(photo_times[key]).replace(tzinfo=tz).timestamp(), only)
         return pos, None if pos else f"фота {spec['photo']} знята па-за часам трэку"
-    if spec.get("time"):
-        try:
-            hh, mm = (int(x) for x in str(spec["time"]).split(":")[:2])
-        except ValueError:
-            return None, f"няправільны час time: {spec['time']} (трэба ГГ:ХХ)"
+    if spec.get("time") is not None:
+        value = spec["time"]
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 24 * 60:
+            hh, mm = divmod(value, 60)  # YAML чытае 10:58 без двукосся як лік 658 (хвіліны ад поўначы)
+        else:
+            m = _TIME_RE.fullmatch(str(value).strip())
+            if not m or int(m[1]) > 23 or int(m[2]) > 59:
+                return None, f"няправільны час time: {value} (трэба ГГ:ХХ)"
+            hh, mm = int(m[1]), int(m[2])
+        found = []
         for di, dd in enumerate(days):
             if only is not None and di != only:
                 continue
-            ts = datetime.combine(date.fromisoformat(dd["date"]), datetime.min.time(), tz).timestamp() + hh * 3600 + mm * 60
-            pos = _by_time(days, ts, di)
-            if pos:
-                return pos, None
-        return None, f"час {spec['time']} па-за часам трэку"
-    if spec.get("km") is not None:
-        try:
-            km = float(spec["km"])
-        except (TypeError, ValueError):
-            return None, f"няправільная адлегласць km: {spec['km']}"
-        di = only if only is not None else 0
-        pts = _points(days[di])
-        return _position(days, di, min(pts, key=lambda p: abs(p[4] - km))), None
-    return None, None
+            stamps = [p[3] for p in _points(dd) if p[3] is not None]
+            if not stamps:
+                continue
+            # Запіс мог працягнуцца пасля поўначы: правяраюцца ўсе каляндарныя даты, якія ён ахоплівае.
+            first = datetime.fromtimestamp(stamps[0] - PHOTO_TOLERANCE_S, tz).date()
+            last = datetime.fromtimestamp(stamps[-1] + PHOTO_TOLERANCE_S, tz).date()
+            for n in range((last - first).days + 1):
+                moment = datetime.combine(first + timedelta(days=n), datetime.min.time(), tz) + timedelta(hours=hh, minutes=mm)
+                pos = _by_time(days, moment.timestamp(), di)
+                if pos:
+                    found.append(pos)
+        if len(found) == 1:
+            return found[0], None
+        if found:
+            return None, f"час {hh:02d}:{mm:02d} ёсць у трэку некалькі разоў — дадайце day або пазначце km"
+        return None, f"час {hh:02d}:{mm:02d} па-за часам трэку"
+    value = spec["km"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None, f"няправільная адлегласць km: {value}"
+    di = only if only is not None else 0
+    pts = _points(days[di])
+    if not 0 <= value <= pts[-1][4] + 0.3:
+        return None, f"кіламетр km: {value} па-за трэкам дня {di + 1} (0–{pts[-1][4]:.1f} км)"
+    return _position(days, di, min(pts, key=lambda p: abs(p[4] - value))), None
+
+
+def find_photo(name, keys) -> tuple[str | None, list[str]]:
+    """Файл фота паводле імя з `photo:` → (імя файла з маніфеста або None, кандыдаты).
+
+    Дакладнае імя файла мае перавагу; імя без пашырэння падыходзіць, толькі калі такое фота адно
+    (`A.jpg` і `A.png` — розныя фота: тады трэба поўнае імя). Без кандыдатаў фота невядомае,
+    з некалькімі — імя неадназначнае.
+    """
+    low = str(name).strip().lower()
+    exact = [k for k in keys if k.lower() == low]
+    if exact:
+        return exact[0], exact[:1]
+    stems = {low, Path(low).stem}
+    same = sorted(k for k in keys if Path(k).stem.lower() in stems)
+    return (same[0] if len(same) == 1 else None), same
+
+
+def photo_problem(name, candidates: list[str]) -> str:
+    if candidates:
+        return f"імя фота {name} неадназначнае ({', '.join(candidates)}) — пазначце поўнае імя файла"
+    return f"фота {name} няма сярод фота паходу"
 
 
 def _ref(spec: dict) -> str | None:
@@ -330,7 +396,7 @@ def _ref(spec: dict) -> str | None:
 def _number(value, what: str, warn) -> float | None:
     if value is None or value == "":
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         warn(f"{what}: чакаецца неадмоўны лік, а не «{value}»")
         return None
     return round(float(value), 2)
@@ -355,7 +421,7 @@ def _travel_minutes(value, warn) -> int | None:
     """Час у дарозе: хвіліны лікам або «г:хх»."""
     if value is None or value == "":
         return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
         return round(value)
     parts = str(value).split(":")
     if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
@@ -364,19 +430,49 @@ def _travel_minutes(value, warn) -> int | None:
     return None
 
 
-def _per_day(value, n_days: int, what: str, warn) -> list | None:
-    """Лік за ўвесь паход або спіс па днях → спіс па днях (None — няма звестак)."""
+def _text(value, what: str, warn) -> dict:
+    """Тэкст радком або на дзвюх мовах {be, en}; іншае значэнне прапускаецца з папярэджаннем."""
+    if value is None or isinstance(value, str):
+        return text_pair(value)
+    if isinstance(value, dict) and all(v is None or isinstance(v, str) for v in value.values()):
+        return text_pair(value)
+    warn(f"{what}: чакаецца тэкст або {{be, en}}, а не «{value}»")
+    return text_pair(None)
+
+
+def _items(value, what: str, warn) -> list:
+    """Спіс запісаў; іншае значэнне прапускаецца з папярэджаннем."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    warn(f"{what}: чакаецца спіс, а не «{value}»")
+    return []
+
+
+def _amount(value, n_days: int, what: str, warn) -> tuple[list | None, float | None]:
+    """Лік за ўвесь паход або спіс па днях → (значэнні па днях або None, сума за паход або None).
+
+    Спіс дапаўняецца невядомымі днямі; сума ёсць, толькі калі лічба вядомая за кожны дзень:
+    пустое — «няма звестак», а не нуль.
+    """
     if value is None or value == "":
-        return None
-    values = value if isinstance(value, list) else [value]
-    if isinstance(value, list) and len(values) != max(n_days, 1):
-        warn(f"{what}: у спісе {len(values)} значэнняў, а дзён у паходзе {max(n_days, 1)}")
-    return [_number(v, what, warn) for v in values]
+        return None, None
+    if not isinstance(value, list):
+        return None, _number(value, what, warn)
+    days = max(n_days, 1)
+    if len(value) != days:
+        warn(f"{what}: у спісе {len(value)} значэнняў, а дзён у паходзе {days}")
+    rows = [_number(v, what, warn) for v in value[:days]] + [None] * (days - len(value))
+    return rows, (round(sum(rows), 2) if all(v is not None for v in rows) else None)
 
 
 def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n_days: int, end: str, manifest: dict,
-                    photos: list, prev: dict | None, home=None) -> tuple[dict | None, str | None]:
-    """Блок `practical:` → (звесткі аўтара для індэкса або None, ручное выпраўленне тыпу маршруту або None)."""
+                    photos: list, prev: dict | None, home=None, prev_photos: list | None = None) -> tuple[dict | None, str | None]:
+    """Блок `practical:` → (звесткі аўтара для індэкса або None, ручное выпраўленне тыпу маршруту або None).
+
+    Няправільнае поле прапускаецца з папярэджаннем і не спыняе зборку.
+    """
     if block is None:
         return None, None
     if not isinstance(block, dict):
@@ -390,50 +486,73 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
     if unknown:
         warn(f"невядомыя палі: {', '.join(sorted(map(str, unknown)))}")
 
-    photo_times = {key.lower(): m.get("taken") for key, m in manifest.items() if m.get("taken")}
-    photo_times.update({Path(key).stem.lower(): t for key, t in list(photo_times.items())})
-    photo_names = {Path(p["src"]).stem: i for i, p in enumerate(photos)}
-    photo_index = {key.lower(): photo_names.get(m.get("name")) for key, m in manifest.items()}
-    photo_index.update({Path(key).stem.lower(): i for key, i in list(photo_index.items())})
+    # Месца па фота — толькі па часе арыгінальнага здымка (`original` з EXIF): запасны час для парадку
+    # ў галерэі (`taken`) паставіў бы крыніцу ў выпадковы пункт трэку. Фота без поля `original` — са старога
+    # маніфеста, час якога яшчэ не дачытаны (тэчка з фота недаступная).
+    photo_times = {key: m["original"] for key, m in manifest.items() if "original" in m}
+    unread = set(manifest) - set(photo_times)
+    published = {photo_name(p): i for i, p in enumerate(photos)}  # імя без «-t», калі засталася толькі мініяцюра
+    photo_index = {key: published.get(m.get("name")) for key, m in manifest.items()}
+    # Ранейшыя месца і фота запісаў: калі крыніцы для разліку няма (кэш не захоўваецца ў Git), яны застаюцца.
     old = {}
-    for group in ((prev or {}).get("water", {}).get("sources") or [], (prev or {}).get("places") or []):
-        old.update({item["ref"]: item["pos"] for item in group if item.get("ref") and item.get("pos")})
+    for group in (((prev or {}).get("water") or {}).get("sources") or [], (prev or {}).get("places") or []):
+        for item in group:
+            index = item.get("photo")
+            known = isinstance(index, int) and prev_photos and 0 <= index < len(prev_photos)
+            if item.get("ref"):
+                old[item["ref"]] = (item.get("pos"), photo_name(prev_photos[index]) if known else None)
 
     def placed(spec: dict, what: str) -> dict:
         """Агульныя палі запісу з месцам: фота, дата назірання, заўвага і месца на трэку."""
-        item = {"note": text_pair(spec.get("note")), "seen": None, "photo": None, "ref": _ref(spec), "pos": None}
+        item = {"note": _text(spec.get("note"), f"{what}.note", warn), "seen": None, "photo": None, "ref": _ref(spec),
+                "pos": None}
         if spec.get("seen"):
             item["seen"] = iso_date(spec["seen"])
             if not item["seen"]:
                 warn(f"{what}: няправільная дата seen: {spec['seen']}")
-        if spec.get("photo"):
-            item["photo"] = photo_index.get(str(spec["photo"]).lower(), photo_index.get(Path(str(spec["photo"])).stem.lower()))
-        if not days and item["ref"] in old:
-            pos, problem = old[item["ref"]], None  # трэку няма ў кэшы: месца з папярэдняга індэкса
+        named = spec.get("photo") is not None
+        key, candidates = find_photo(spec["photo"], manifest) if named else (None, [])
+        was_pos, was_photo = old.get(item["ref"], (None, None)) if item["ref"] else (None, None)
+        # Фота няма ў маніфесце, але яно ёсць у галерэі пад ранейшым імем: маніфест страчаны, а не фота.
+        kept = named and key is None and not candidates and was_photo in published
+        if key is not None:
+            item["photo"] = photo_index.get(key)
+        elif kept:
+            item["photo"] = published[was_photo]
+        lost = named and key is None and not kept  # фота сапраўды няма або імя неадназначнае
+        by_photo = (item["ref"] or "").startswith("photo:")
+        waiting = by_photo and (key in unread or kept)
+        if by_photo and lost:
+            pos, problem = None, photo_problem(spec["photo"], candidates)  # ні фота, ні месца
+        elif was_pos and (not days or waiting):
+            pos, problem = was_pos, None  # крыніцы для разліку няма: месца з папярэдняга індэкса
+        elif waiting:
+            pos, problem = None, f"час здымкі фота {spec['photo']} яшчэ не прачытаны (тэчка з фота недаступная)"
         else:
             pos, problem = locate(spec, days, photo_times)
+        if lost and not by_photo:
+            warn(f"{what}: {photo_problem(spec['photo'], candidates)}")  # месца пазначана іншым спосабам
         if problem:
             warn(f"{what}: месца не вызначана — {problem}")
         item["pos"] = pos
         return item
 
     out: dict = {}
-    notes = {key: text_pair(block.get(key)) for key in NOTE_KEYS}
+    notes = {key: _text(block.get(key), key, warn) for key in NOTE_KEYS}
     out["notes"] = {key: pair for key, pair in notes.items() if pair["be"] or pair["en"]}
-    weather = text_pair(block.get("weather_notes"))
+    weather = _text(block.get("weather_notes"), "weather_notes", warn)
     out["weatherNotes"] = weather if weather["be"] or weather["en"] else None
 
     # --- вада: расход і крыніцы
     water_in = block.get("water")
     water = None
     if isinstance(water_in, dict):
-        fields = {k: _per_day(water_in.get(k), n_days, f"water.{k}", warn) for k in ("drunk", "taken", "refilled", "left")}
-        rows = max((len(v) for v in fields.values() if v), default=0)
-        water = {"days": [{k: (v[i] if v and i < len(v) else None) for k, v in fields.items()} for i in range(rows)],
-                 "available": _flag(water_in.get("available")), "note": text_pair(water_in.get("note")), "sources": []}
-        for k in fields:  # сума за паход — толькі калі лічба ёсць за кожны дзень: пустое не роўна нулю
-            vals = [d[k] for d in water["days"]]
-            water[k] = round(sum(vals), 2) if vals and all(v is not None for v in vals) else None
+        amounts = {k: _amount(water_in.get(k), n_days, f"water.{k}", warn) for k in ("drunk", "taken", "refilled", "left")}
+        rows = max((len(r) for r, _ in amounts.values() if r), default=0)  # па днях — калі хоць адно поле спісам
+        water = {"days": [{k: (r[i] if r else None) for k, (r, _) in amounts.items()} for i in range(rows)],
+                 "available": _flag(water_in.get("available")), "note": _text(water_in.get("note"), "water.note", warn),
+                 "sources": []}
+        water.update({k: total for k, (_, total) in amounts.items()})
         if water["drunk"] is not None and stats:
             if stats.get("duration"):
                 water["perHour"] = round(water["drunk"] / (stats["duration"] / 3600), 2)  # за гадзіну на маршруце
@@ -443,13 +562,14 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
             balance = water["taken"] + water["refilled"] - water["left"]
             if abs(balance - water["drunk"]) > 0.25:
                 warn(f"water: узята + папоўнена − засталося = {balance:g} л, а выпіта {water['drunk']:g} л — праверце лічбы")
-        for i, src in enumerate(water_in.get("sources") or [], 1):
+        for i, src in enumerate(_items(water_in.get("sources"), "water.sources", warn), 1):
             if not isinstance(src, dict):
                 warn(f"water.sources[{i}]: чакаецца запіс з палямі")
                 continue
-            item = placed(src, f"water.sources[{i}]")
-            item.update({"type": _choice(src.get("type"), SOURCE_TYPES, f"water.sources[{i}].type", warn, "other"),
-                         "name": text_pair(src.get("name")), "water": _flag(src.get("water")),
+            what = f"water.sources[{i}]"
+            item = placed(src, what)
+            item.update({"type": _choice(src.get("type"), SOURCE_TYPES, f"{what}.type", warn, "other"),
+                         "name": _text(src.get("name"), f"{what}.name", warn), "water": _flag(src.get("water")),
                          "seasonal": _flag(src.get("seasonal")), "treat": _flag(src.get("treat"))})
             water["sources"].append(item)
     elif water_in is not None:
@@ -458,33 +578,36 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
 
     # --- як дабрацца
     out["gettingThere"] = []
-    for i, way in enumerate(block.get("getting_there") or [], 1):
+    for i, way in enumerate(_items(block.get("getting_there"), "getting_there", warn), 1):
+        what = f"getting_there[{i}]"
         if not isinstance(way, dict):
-            warn(f"getting_there[{i}]: чакаецца запіс з палямі")
+            warn(f"{what}: чакаецца запіс з палямі")
             continue
         date_ = iso_date(way["date"]) if way.get("date") else None
         if way.get("date") and not date_:
-            warn(f"getting_there[{i}]: няправільная дата: {way['date']}")
+            warn(f"{what}: няправільная дата: {way['date']}")
         out["gettingThere"].append({
-            "type": _choice(way.get("type"), TRANSPORT_TYPES, f"getting_there[{i}].type", warn, "other"),
-            "from": text_pair(way.get("from") or home), "to": text_pair(way.get("to")),  # home — з config.yaml
-            "minutes": _travel_minutes(way.get("time"), warn), "km": _number(way.get("km"), f"getting_there[{i}].km", warn),
-            "price": _number(way.get("price"), f"getting_there[{i}].price", warn),  # лары
-            "priceFor": _choice(way.get("price_for"), ("car", "person"), f"getting_there[{i}].price_for", warn),
-            "trip": _choice(way.get("trip"), ("one_way", "round_trip"), f"getting_there[{i}].trip", warn),
-            "date": date_, "boarding": text_pair(way.get("boarding")), "road": text_pair(way.get("road")),
-            "note": text_pair(way.get("note")),
+            "type": _choice(way.get("type"), TRANSPORT_TYPES, f"{what}.type", warn, "other"),
+            "from": _text(way.get("from") or home, f"{what}.from", warn),  # home — з config.yaml
+            "to": _text(way.get("to"), f"{what}.to", warn),
+            "minutes": _travel_minutes(way.get("time"), warn), "km": _number(way.get("km"), f"{what}.km", warn),
+            "price": _number(way.get("price"), f"{what}.price", warn),  # лары
+            "priceFor": _choice(way.get("price_for"), ("car", "person"), f"{what}.price_for", warn),
+            "trip": _choice(way.get("trip"), ("one_way", "round_trip"), f"{what}.trip", warn),
+            "date": date_, "boarding": _text(way.get("boarding"), f"{what}.boarding", warn),
+            "road": _text(way.get("road"), f"{what}.road", warn), "note": _text(way.get("note"), f"{what}.note", warn),
         })
 
     # --- асаблівыя месцы
     out["places"] = []
-    for i, place in enumerate(block.get("places") or [], 1):
+    for i, place in enumerate(_items(block.get("places"), "places", warn), 1):
+        what = f"places[{i}]"
         if not isinstance(place, dict):
-            warn(f"places[{i}]: чакаецца запіс з палямі")
+            warn(f"{what}: чакаецца запіс з палямі")
             continue
-        item = placed(place, f"places[{i}]")
-        item.update({"type": _choice(place.get("type"), PLACE_TYPES, f"places[{i}].type", warn, "other"),
-                     "name": text_pair(place.get("name"))})
+        item = placed(place, what)
+        item.update({"type": _choice(place.get("type"), PLACE_TYPES, f"{what}.type", warn, "other"),
+                     "name": _text(place.get("name"), f"{what}.name", warn)})
         out["places"].append(item)
 
     filled = out["notes"] or out["weatherNotes"] or out["water"] or out["gettingThere"] or out["places"]

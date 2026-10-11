@@ -36,7 +36,8 @@ function factsBlock(facts, whole) {
   if (facts.sun && !whole) {
     const left = facts.sun.left;
     rows.push(row(t("daylight"), join([`${facts.sun.rise}–${facts.sun.set}`,
-      left == null ? null : left >= 0 ? t("daylightLeft", duration(left * 60)) : t("daylightOver", duration(-left * 60))])));
+      facts.sun.night ? t("daylightNight")
+        : left == null ? null : left >= 0 ? t("daylightLeft", duration(left * 60)) : t("daylightOver", duration(-left * 60))])));
   }
   const pace = join([facts.speed != null && t("speed", num(facts.speed, 1)), facts.stops ? t("stops", duration(facts.stops)) : null]);
   if (pace) rows.push(row(t("pace"), pace));
@@ -84,8 +85,12 @@ function waterGroup(w, hike, day, openPhoto) {
   const litres = (v) => `${num(v, 2)} ${t("litre")}`;
   const sources = onDay(w.sources, day);
   const d = day != null ? w.days[day] : w; // выбраны дзень або ўвесь паход
-  const known = w.available === true || w.sources.some((s) => s.water === true) ? "waterYes"
-    : w.available === false ? "waterNo" : w.sources.length ? null : "waterUnknown";
+  // Для выбранага дня — толькі па яго крыніцах: вада, знойдзеная ў іншы дзень, нічога не кажа пра гэты.
+  // Агульная пазнака паходу (available) паказваецца як звестка пра ўвесь маршрут.
+  const found = sources.some((s) => s.water === true);
+  const known = found ? "waterYes"
+    : w.available === true ? (day == null ? "waterYes" : "waterYesHike")
+      : w.available === false ? "waterNo" : sources.length ? null : "waterUnknown";
   const balance = d ? join([d.taken != null && `${t("taken")} ${litres(d.taken)}`,
     d.refilled != null && `${t("refilled")} ${litres(d.refilled)}`, d.left != null && `${t("left")} ${litres(d.left)}`]) : "";
   const rates = day == null ? join([w.perHour != null && t("perHour", num(w.perHour, 2)),

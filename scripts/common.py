@@ -48,12 +48,11 @@ def write_json(path: Path, data, compact: bool = False) -> None:
     """Запіс праз часовы файл і os.replace: перапынены запіс не пакідае паўфайла."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
+    # allow_nan=False: NaN і Infinity — не JSON, браўзер такі файл не прачытае; лепш памылка, чым зламаны сайт.
+    text = (json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False) if compact
+            else json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        if compact:
-            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-        else:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        f.write(text)
     os.replace(tmp, path)
 
 
@@ -75,6 +74,12 @@ def text_pair(value) -> dict:
     if isinstance(value, dict):
         return {"be": (value.get("be") or "").strip(), "en": (value.get("en") or "").strip()}
     return {"be": (value or "").strip(), "en": ""}
+
+
+def photo_name(photo: dict) -> str:
+    """Імя апублікаванага фота без «-t»: калі замест поўнай копіі ў індэксе мініяцюра, src таксама на яе."""
+    stem = Path(photo["src"]).stem
+    return stem[:-2] if photo["src"] == photo["thumb"] and stem.endswith("-t") else stem
 
 
 def has_track(coords) -> bool:
