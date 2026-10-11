@@ -321,6 +321,26 @@ img { display: block; max-width: 100%; }
 button.link-btn { background: none; }
 .link-btn svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
+/* ---- Практычная інфармацыя ---------------------------------------------- */
+.p-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 14px; }
+.p-facts dt { color: var(--muted); }
+.p-facts dd { margin: 0; }
+.p-link { white-space: nowrap; }
+.p-muted, .p-meta { color: var(--text-2); }
+.p-meta { font-size: 13px; }
+.p-source { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.p-group { margin-top: 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.p-group summary { cursor: pointer; font-weight: 600; }
+.p-group summary .p-hint { margin-left: 8px; font-weight: 400; font-size: 13px; color: var(--text-2); }
+.p-group[open] summary { margin-bottom: 8px; }
+.p-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.p-item { display: flex; gap: 10px; align-items: flex-start; }
+.p-title { font-weight: 600; }
+.p-text, .p-note { margin: 0 0 6px; white-space: pre-line; }
+.p-item .p-text, .p-item .p-note { margin: 2px 0 0; }
+.p-photo { flex: none; padding: 0; border: 0; border-radius: 6px; overflow: hidden; background: var(--surface-3); }
+.p-photo img { display: block; width: 48px; height: 48px; object-fit: cover; }
+
 .site-footer {
   margin-top: 24px; padding-top: 12px;
   border-top: 1px solid var(--border);

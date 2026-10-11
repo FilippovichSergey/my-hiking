@@ -12,6 +12,13 @@ komoot_sports: [hike, mountaineering]
 
 youtube_channel: "https://www.youtube.com/@vlog_belarusa"
 
+# Адкуль звычайна пачынаецца дарога да паходу: падстаўляецца ў «Як дабрацца», калі `from` не пазначана.
+home:
+  name:
+    be: "Батумі, парк Качынскіх"
+    en: "Batumi, Kaczyński Park"
+  point: [41.62692, 41.59822]   # [шырата, даўгата]
+
 # Часавы пояс па змаўчанні (Грузія = UTC+4), каб правільна вызначаць дату тура.
 default_utc_offset: 4
 

@@ -18,8 +18,9 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+import practical
 from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, read_version, load_yaml, read_json, site_photos_dir, slugify,
-                    tour_local_datetime, write_json)
+                    text_pair, tour_local_datetime, write_json)
 from geo import haversine, simplify
 
 PILLOW_EXT = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
@@ -478,12 +479,6 @@ def hike_dates(slug: str, raw_start, raw_end, days: list) -> tuple[str, str]:
     return start, end or start
 
 
-def text_pair(value) -> dict:
-    if isinstance(value, dict):
-        return {"be": (value.get("be") or "").strip(), "en": (value.get("en") or "").strip()}
-    return {"be": (value or "").strip(), "en": ""}
-
-
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="hike build")
     ap.add_argument("--force", action="store_true", help="перагенераваць усе фота")
@@ -524,8 +519,23 @@ def main(argv=None) -> None:
                   f"(запусціце `hike komoot{' --refresh' if empty else ''}`)")
             # Геаметрыя ранейшая, а спасылкі — толькі на туры, якія дагэтуль публічныя.
             days, lines, track = current_links(prev["days"], tours_meta), prev["lines"], prev["track"]
+            raw, facts = [], prev.get("facts")  # разлік па трэку — таксама ранейшы
         else:
             days, lines, track = build_tracks(slug, tour_ids, offset, tours_meta)
+            raw, facts = practical.raw_days(tour_ids, offset), None
+        stats = {
+            "distance": round(sum(d["distance"] for d in days), 2),
+            "up": sum(d["up"] for d in days),
+            "down": sum(d["down"] for d in days),
+            "duration": sum(d["duration"] for d in days),
+            "moving": sum(d["moving"] for d in days),
+            "maxAlt": max((d["maxAlt"] for d in days if d["maxAlt"] is not None), default=None),
+            "minAlt": min((d["minAlt"] for d in days if d["minAlt"] is not None), default=None),
+        } if days else None
+        if raw and len(raw) == len(days):
+            for day, raw_day in zip(days, raw):
+                day["facts"] = practical.day_facts(raw_day, day)
+            facts = practical.hike_facts(raw, [d["facts"] for d in days], stats)
 
         start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
         if not start:
@@ -561,8 +571,13 @@ def main(argv=None) -> None:
             print(f"  ! {slug}: невядомая складанасць '{difficulty}' (easy|medium|hard|expert)")
             difficulty = None
 
-        alts_max = [d["maxAlt"] for d in days if d["maxAlt"] is not None]
-        alts_min = [d["minAlt"] for d in days if d["minAlt"] is not None]
+        # Звесткі аўтара; ручное выпраўленне тыпу маршруту важнейшае за разлік.
+        notes, type_override = practical.parse_practical(
+            slug, h.get("practical"), days=raw, stats=stats, n_days=len(days), end=end,
+            manifest=read_json(CACHE / "photos" / f"{slug}.json", {}), photos=photos, prev=(prev or {}).get("practical"),
+            home=(cfg.get("home") or {}).get("name"))
+        if type_override:
+            facts = {**(facts or {}), "type": type_override, "typeBy": "author"}
         videos = []
         for vid in h.get("youtube") or []:
             v = videos_by_id.get(vid, {"id": vid})
@@ -575,15 +590,9 @@ def main(argv=None) -> None:
             "title": text_pair(h.get("title")),
             "region": text_pair(h.get("region")),
             "difficulty": difficulty,
-            "stats": {
-                "distance": round(sum(d["distance"] for d in days), 2),
-                "up": sum(d["up"] for d in days),
-                "down": sum(d["down"] for d in days),
-                "duration": sum(d["duration"] for d in days),
-                "moving": sum(d["moving"] for d in days),
-                "maxAlt": max(alts_max) if alts_max else None,
-                "minAlt": min(alts_min) if alts_min else None,
-            } if days else None,
+            "stats": stats,
+            "facts": facts,          # разлік па трэку: тып маршруту, старт і фініш, светлавы дзень, тэмп
+            "practical": notes,      # звесткі аўтара з блока practical:
             "days": days,
             "point": point,
             "bbox": bbox,

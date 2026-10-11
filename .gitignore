@@ -5,3 +5,4 @@ __pycache__/
 .claude/
 node_modules/
 difficulty-icons/
+review/practical-section-proposals_*.md

@@ -133,6 +133,58 @@ def comment(s: str) -> str:
     return " ".join(str(s or "").split())
 
 
+# Закаментаваны шаблон практычнай часткі: прыбярыце «# » перад патрэбнымі радкамі (падрабязна — у README).
+PRACTICAL_TEMPLATE = """\
+# Практычная частка. Тып маршруту, старт і фініш, светлавы дзень і тэмп лічацца з трэку самі.
+# practical:
+#   checked: 2025-05-17            # калі звесткі правераны (па змаўчанні — дата паходу)
+#   route_type:                    # толькі каб выправіць разлік: loop | out_and_back | point_to_point | mixed
+#   weather_notes: "Раніцай туман, на хрыбце моцны вецер."
+#   water:
+#     drunk: 2.5                   # выпіта, л (для шматдзённага — спіс па днях: [2.5, 3])
+#     taken: 3                     # неабавязкова: узята на старце, папоўнена, засталося
+#     refilled: 1
+#     left: 1.5
+#     available: true              # ці ёсць вада на маршруце: true | false (пуста — няма звестак)
+#     sources:
+#       - type: spring             # spring | tap | well | stream | other
+#         photo: IMG_1234          # месца на трэку — па часе здымкі; або time: "10:58", km: 7.1, at: [41.6, 41.9]
+#         water: true              # ці была вада: true | false (пуста — не вядома)
+#         seasonal: true           # перасыхае ўлетку
+#         treat: false             # ці трэба апрацоўваць ваду
+#         note: "Труба каля сцежкі, добры напор."
+#   getting_there:
+#     - type: taxi                 # car | taxi | marshrutka | bus | train | other
+#       from: "Батумі, парк Качынскіх"
+#       to: "Мілісі"
+#       time: "1:10"               # у дарозе: г:хх або хвіліны
+#       km: 42
+#       price: 80                  # лары
+#       price_for: car             # car | person
+#       trip: one_way              # one_way | round_trip
+#       date: 2025-05-17
+#       boarding: "Месца пасадкі"
+#       road: "Апошнія 5 км — грунтоўка."
+#       note: ""
+#   parking: "Дзе пакінуць машыну."
+#   places:
+#     - type: shelter              # firepit | shelter | swing | camp | signpost | viewpoint | table | toilet | parking | obstacle | other
+#       name: "Альтанка каля вадаспада"
+#       photo: IMG_1240
+#       note: ""
+#   surface: "Грунт, камяні."      # пакрыццё сцежкі
+#   marking: "Маркіроўкі няма."    # маркіроўка і навігацыя
+#   obstacles: "Брод праз 3 км."   # перашкоды
+#   signal: "Сувязь знікае пасля 5 км."
+#   dangers: "Пастуховыя сабакі."
+#   gear: "Палкі, гетры."
+#   season: "Травень–кастрычнік."
+#   overnight: "Роўныя пляцоўкі каля возера, вада побач."
+#   after: "Дзе паесці, крама, начлег, агульны кошт."
+#   suitable: "Дзецям ад 10 гадоў; з сабакам можна."
+""".splitlines()
+
+
 def render_yaml(h: dict, today: str) -> str:
     lines = [
         f"# Чарнавік створаны аўтаматычна {today}: праверце і дапоўніце.",
@@ -173,6 +225,7 @@ def render_yaml(h: dict, today: str) -> str:
         "  en: |",
         "    ",
         "",
+        *PRACTICAL_TEMPLATE,
     ]
     return "\n".join(lines)
 

@@ -58,11 +58,38 @@ const hike = (slug, region, extra = {}) => ({
   days: [day("2025-01-01", 10)], point: [42, 41], bbox: [42, 41, 42.1, 41.1], lines: [[[42, 41], [42.1, 41.1]]],
   track: `data/tracks/${slug}.json`, cover: null, photos: [], videos: [], impressions: { be: "", en: "" }, ...extra,
 });
+const pair = (be = "", en = "") => ({ be, en });
+// разлік па трэку і звесткі аўтара для паходу «guria» — у тым выглядзе, як іх запісвае `hike build`
+const FACTS = {
+  type: "loop", start: { at: [42, 41], alt: 900, time: "08:00" }, finish: { at: [42, 41], alt: 910, time: "12:30" },
+  sun: { rise: "06:00", set: "20:00", left: 450 }, speed: 3.2, stops: 1800, gain: 180,
+  steepUp: { grade: 21, km: 1.2 }, steepDown: { grade: 18, km: 3.4 },
+};
+const PRACTICAL = {
+  checked: "2025-01-01", weatherNotes: pair("Туман.", "Fog."),
+  notes: { surface: pair("Грунт.", "Dirt."), parking: pair("Каля школы.") },
+  water: {
+    days: [{ drunk: 2, taken: 3, refilled: null, left: null }], drunk: 2, taken: 3, refilled: null, left: null,
+    perHour: 0.5, per10km: 4, available: null, note: pair(),
+    sources: [{
+      type: "spring", name: pair(), water: true, seasonal: true, treat: false, seen: null, photo: null, ref: "km::1",
+      note: pair("Труба."), pos: { day: 0, km: 1, at: [42, 41], alt: 950, time: "09:00" },
+    }],
+  },
+  gettingThere: [{
+    type: "taxi", from: pair("Батумі", "Batumi"), to: pair("Вёска", "Village"), minutes: 70, km: 42, price: 80,
+    priceFor: "car", trip: "one_way", date: "2025-01-01", boarding: pair(), road: pair("Грунтоўка."), note: pair(),
+  }],
+  places: [{
+    type: "shelter", name: pair("Альтанка", "Gazebo"), note: pair(), seen: null, photo: null, ref: "at::41.05, 42.05",
+    pos: { day: 0, km: 2.5, at: [42.05, 41.05], alt: 980, time: "10:00", off: 120 },
+  }],
+};
 const DATA = {
   version: "9.8.7",
   hikes: [
     hike("slow", { be: "Аджарыя", en: "Adjara" }),
-    hike("guria", { be: "Гурыя", en: "Guria" }, { difficulty: "expert", stats: stats(5, 900) }),
+    hike("guria", { be: "Гурыя", en: "Guria" }, { difficulty: "expert", stats: stats(5, 900), facts: FACTS, practical: PRACTICAL }),
     hike("broken", { be: "Аджарыя", en: "Adjara" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
     // індэкс з двума днямі, а трэк (TRACK) — з адным: стары кэш браўзера або няўдалая зборка
     hike("mismatch", { be: "Гурыя", en: "Guria" }, { days: [day("2025-01-01", 5), day("2025-01-02", 5)] }),
@@ -285,7 +312,7 @@ test("сартаванне, фільтры па нагрузцы і «Скіну
 
   panel().querySelector(".reset").click();
   assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack", "trek3"], "усе паходы, сартаванне застаецца");
-  assert.deepEqual([...panel().querySelectorAll(".filter-row select")].map((el) => el.value), ["", "", "", ""]);
+  assert.deepEqual([...panel().querySelectorAll(".filter-row select")].map((el) => el.value), ["", "", "", "", ""]);
   assert.equal(panel().querySelector(".reset"), null);
   assert.equal(panel().querySelector("select.sort").value, "up");
 
@@ -404,6 +431,8 @@ test("фільтры і карта: «Паказаць знойдзеныя на
     select.dispatchEvent(new window.Event("change"));
   };
   assert.equal(showOnMap(), null, "без фільтраў кнопкі няма");
+  assert.deepEqual([...panel().childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent), [],
+    "пустыя неабавязковыя вузлы не трапляюць на старонку тэкстам «null»");
 
   choose("Любая адлегласць", "long"); // застаецца адзін паход — «late»
   assert.equal(showOnMap().textContent, "Паказаць знойдзеныя на карце");
@@ -429,4 +458,57 @@ test("фільтры і карта: «Паказаць знойдзеныя на
   assert.equal(maplibregl.Popup.content.querySelector(".popup-nums .diff").dataset.difficulty, "expert");
   assert.deepEqual(hover("slow"), ["slow", "1 студзеня 2025", "10 км↑ 100 м"], "без складанасці — толькі лічбы");
   assert.deepEqual(hover("notrack"), ["notrack", "1 студзеня 2025"], "без трэку і складанасці радка няма");
+});
+
+test("практычная інфармацыя: разлік па трэку, звесткі аўтара і тып маршруту ў спісе", async () => {
+  await go("#/be");
+  const titles = () => [...panel().querySelectorAll(".card-title")].map((el) => el.textContent);
+  const card = [...panel().querySelectorAll(".card")].find((el) => el.querySelector(".card-title").textContent === "guria");
+  assert.ok(card.querySelector(".card-nums").textContent.includes("Кола"), "тып маршруту на картцы");
+  const typeSelect = panel().querySelector('.filter-row select[aria-label="Любы тып маршруту"]');
+  typeSelect.value = "loop";
+  typeSelect.dispatchEvent(new window.Event("change"));
+  assert.deepEqual(titles(), ["guria"]);
+  panel().querySelector(".reset").click();
+
+  await go("#/be/guria");
+  await waitFor(() => panel().querySelector(".p-facts"), "блок практычнай інфармацыі");
+  assert.ok([...panel().querySelectorAll(".detail h2")].some((el) => el.textContent === "Практычная інфармацыя"));
+  const rows = Object.fromEntries([...panel().querySelectorAll(".p-facts dt")].map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+  assert.equal(rows["Тып маршруту"], "Колавы");
+  assert.equal(rows["Старт"], "08:00 · 900 м Маршрут да старту ↗");
+  assert.equal(rows["Фініш"], "12:30 · 910 м");
+  assert.equal(rows["Светлавы дзень"], "06:00–20:00 · пасля фінішу заставалася 7 г 30 хв святла");
+  assert.equal(rows["Тэмп"], "3,2 км/г у руху · прыпынкі 30 хв");
+  assert.equal(rows["Рэльеф"], "180 м набору на кіламетр · найкруцейшы пад'ём 21 % на 500 м (ад 1,2 км) · найкруцейшы спуск 18 % на 500 м (ад 3,4 км)");
+  assert.equal(panel().querySelector(".p-link").getAttribute("href"), "https://www.google.com/maps/dir/?api=1&destination=41,42");
+
+  // пад кожнай часткай падпісана, адкуль даныя
+  const groups = [...panel().querySelectorAll(".p-group")];
+  assert.deepEqual(groups.map((g) => g.querySelector("summary").textContent),
+    ["Як дабрацца1 варыянт", "ВадаВыпіта 2 л · 1 крыніца", "Асаблівыя месцы1", "Сцежка і ўмовы", "Надвор'е"]);
+  assert.equal(panel().querySelector(".p-facts + .p-source").textContent, "Разлік па трэку");
+  assert.ok(groups.every((g) => g.querySelector(".p-source").textContent === "Мае назіранні"));
+  const text = (i) => [...groups[i].querySelectorAll(".p-title, .p-meta, .p-text, .p-note")].map((el) => el.textContent);
+  assert.deepEqual(text(0), ["Таксі · Батумі → Вёска", "1 г 10 хв · 42 км · 80 ₾, за машыну, у адзін бок · цана на 1 студзеня 2025",
+    "Дарога: Грунтоўка.", "Паркоўка: Каля школы."]);
+  assert.deepEqual(text(1), ["На маршруце ёсць вада.", "Выпіта 2 л (0,5 л за гадзіну на маршруце · 4 л на 10 км)", "узята 3 л",
+    "Крыніца", "1 км ад старту · 950 м · 09:00", "вада была · перасыхае ў сухі сезон · можна піць без апрацоўкі", "Труба."]);
+  assert.deepEqual(text(2), ["Альтанка або навес: Альтанка", "2,5 км ад старту · 980 м · 10:00 · збоку ад трэку, 120 м"]);
+  assert.deepEqual(text(3), ["Пакрыццё: Грунт."]);
+  assert.deepEqual(text(4), ["Туман."]);
+  assert.equal([...panel().querySelectorAll(".p-source")].at(-1).textContent, "Звесткі правераны 1 студзеня 2025");
+
+  await go("#/en/guria");
+  await waitFor(() => panel().querySelector(".p-facts"), "блок па-англійску");
+  assert.ok([...panel().querySelectorAll(".detail h2")].some((el) => el.textContent === "Practical information"));
+  assert.equal(panel().querySelector(".p-facts dd").textContent, "Loop");
+  assert.equal(panel().querySelector(".p-group .p-title").textContent, "Taxi · Batumi → Village");
+
+  // паход без трэку і без звестак аўтара — блока няма
+  await go("#/be/notrack");
+  await waitFor(() => panel().querySelector(".detail h1")?.textContent === "notrack", "старонка паходу без трэку");
+  assert.equal(panel().querySelector(".p-facts, .p-group"), null);
+  assert.ok(![...panel().querySelectorAll(".detail h2")].some((el) => el.textContent === "Практычная інфармацыя"));
+  await go("#/be");
 });

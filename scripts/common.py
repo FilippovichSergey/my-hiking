@@ -70,6 +70,13 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
+def text_pair(value) -> dict:
+    """Тэкст на дзвюх мовах: {be, en} або проста радок (тады гэта беларускі тэкст)."""
+    if isinstance(value, dict):
+        return {"be": (value.get("be") or "").strip(), "en": (value.get("en") or "").strip()}
+    return {"be": (value or "").strip(), "en": ""}
+
+
 def has_track(coords) -> bool:
     """Ці ёсць у туры трэк: хаця б два пункты з каардынатамі."""
     return sum(1 for c in coords or [] if c and c[0] is not None and c[1] is not None) >= 2

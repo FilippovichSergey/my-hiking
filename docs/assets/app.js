@@ -1,6 +1,7 @@
 // Галоўны модуль: даныя, маршрутызацыя (#/be/<slug>), панэль са спісам і старонкай паходу.
 import { copyText, cssVar, downloadFile, h, s } from "./dom.js";
 import { gpxText } from "./gpx.js";
+import { renderPractical } from "./practical.js";
 import { dateRange, duration, lang, num, pick, setLang, shortDate, t } from "./i18n.js";
 import { createMap } from "./map.js";
 import { renderProfile } from "./profile.js";
@@ -14,7 +15,7 @@ const MOUNTAIN_ICON = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2 2
 const body = document.getElementById("panel-body");
 const state = {
   hikes: [],
-  filters: { q: "", year: "", region: "", difficulty: "", distance: "", days: "" },
+  filters: { q: "", year: "", region: "", difficulty: "", distance: "", days: "", type: "" },
   sort: "new",
   selected: null,
   day: null,
@@ -143,7 +144,7 @@ const SORTS = {
 };
 
 function filtered() {
-  const { q, year, region, difficulty, distance, days } = state.filters;
+  const { q, year, region, difficulty, distance, days, type } = state.filters;
   const needle = q.trim().toLowerCase();
   const [minKm, maxKm] = DISTANCES[distance] || [];
   return state.hikes.filter((hk) =>
@@ -152,6 +153,7 @@ function filtered() {
     (!difficulty || hk.difficulty === difficulty) &&
     (!distance || (hk.stats != null && hk.stats.distance >= minKm && hk.stats.distance < maxKm)) &&
     (!days || DAY_COUNTS[days](dayCount(hk))) &&
+    (!type || hk.facts?.type === type) &&
     (!needle || [hk.title.be, hk.title.en, hk.region.be, hk.region.en].some((s) => s?.toLowerCase().includes(needle))));
 }
 
@@ -187,6 +189,7 @@ function hikeNums(hk) {
   const nums = [];
   if (hk.stats) nums.push(`${num(hk.stats.distance, 1)} ${t("km")}`, `↑ ${num(hk.stats.up)} ${t("m")}`);
   if (dayCount(hk) > 1) nums.push(t("days", dayCount(hk)));
+  if (hk.facts?.type) nums.push(t("routeShort")[hk.facts.type]);
   return nums;
 }
 
@@ -258,7 +261,8 @@ function renderList() {
     },
   });
 
-  body.replaceChildren(
+  // replaceChildren ператварае null у тэкст «null», таму неабавязковыя вузлы адсейваюцца
+  body.replaceChildren(...[
     summaryTiles(list),
     h("div", { class: "filters" },
       search,
@@ -273,7 +277,10 @@ function renderList() {
         select(Object.keys(DISTANCES).map((d) => [d, t("distances")[d]]), state.filters.distance, t("allDistances"),
           (v) => setFilter("distance", v), t("allDistances")),
         select(Object.keys(DAY_COUNTS).map((d) => [d, t("dayCounts")[d]]), state.filters.days, t("allDayCounts"),
-          (v) => setFilter("days", v), t("allDayCounts")))),
+          (v) => setFilter("days", v), t("allDayCounts"))),
+      h("div", { class: "filter-row" },
+        select(Object.keys(t("routeShort")).map((k) => [k, t("routeShort")[k]]), state.filters.type, t("allRouteTypes"),
+          (v) => setFilter("type", v), t("allRouteTypes")))),
     h("div", { class: "result-row" },
       h("p", { class: "result-count", "aria-live": "polite" }, t("found", list.length)),
       reset,
@@ -284,7 +291,7 @@ function renderList() {
       ? h("ul", { class: "hike-list" }, list.map(card))
       : h("p", { class: "empty" }, t("nothing")),
     siteFooter(),
-  );
+  ].filter(Boolean));
   map.setHikes(list);
   if (wasSelected || !renderList.fitted) {
     map.fitHikes(list);
@@ -416,6 +423,8 @@ async function renderDetail(hike, fit = true) {
 
     track ? [h("h2", null, t("profile")), h("div", { class: "profile", id: "profile" })] : null,
     hike.track && !track ? h("p", { class: "notice" }, t("trackError")) : null,
+
+    renderPractical(hike, day, (index) => openGallery(hike, index)),
 
     hike.photos.length ? [
       h("h2", null, `${t("photos")} · ${hike.photos.length}`),
