@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import bisect
+import hashlib
+import json
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -251,6 +253,82 @@ def hike_facts(days: list[dict], per_day: list[dict], totals: dict) -> dict:
     return facts
 
 
+# --- Надвор'е: пункты запыту і паказчыкі з гадзінных шэрагаў Open-Meteo ----------------
+
+WEATHER_VARS = {  # назва паказчыка ў Open-Meteo → поле ў індэксе сайта
+    "temperature_2m": "temp", "apparent_temperature": "feels", "precipitation": "precip", "snowfall": "snow",
+    "wind_speed_10m": "wind", "wind_gusts_10m": "gusts", "cloud_cover": "cloud", "weather_code": "code",
+}
+WEATHER_EDGE_S = 1800  # гадзіна ўваходзіць у «час паходу», калі яна не далей за паўгадзіны ад старту або фінішу
+
+
+def weather_points(day: dict) -> list[dict]:
+    """Пункты дня, для якіх патрэбна надвор'е: старт, найвышэйшы пункт і фініш — з момантам, калі аўтар там быў.
+
+    Пусты спіс, калі ў трэку няма часу (імпартаваны GPX): невядома, для якіх гадзін пытацца.
+    """
+    pts = [p for p in _points(day) if p[3] is not None]
+    if len(pts) < 2:
+        return []
+    with_alt = [p for p in pts if p[2] is not None]
+    top = max(with_alt, key=lambda p: p[2]) if with_alt else None
+    chosen = [("start", pts[0])]
+    if top is not None and top is not pts[0] and top is not pts[-1]:
+        chosen.append(("top", top))
+    chosen.append(("finish", pts[-1]))
+    return [{"role": role, "lat": round(p[0], 3), "lng": round(p[1], 3),
+             "alt": round(p[2]) if p[2] is not None else None, "ts": round(p[3])} for role, p in chosen]
+
+
+def weather_key(points: list[dict]) -> str:
+    """Подпіс запыту: калі трэк змяніўся, раней спампаванае надвор'е да яго ўжо не адносіцца."""
+    return hashlib.sha1(json.dumps(points, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def summarize_weather(points: list[dict], series: list[dict]) -> dict:
+    """Паказчыкі дня з гадзінных шэрагаў (па адным на пункт; `time` — секунды UTC).
+
+    points — значэнні бліжэйшай гадзіны да моманту, калі аўтар быў у пункце; span — межы за ўвесь час паходу
+    па ўсіх пунктах (ападкі і снег — найбольшая сума сярод пунктаў). Пустое значэнне сэрвісу застаецца пустым,
+    а не нулём; тады complete = False і `hike fetch` паспрабуе яшчэ раз.
+    """
+    def finite(value):
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+    lo, hi = points[0]["ts"] - WEATHER_EDGE_S, points[-1]["ts"] + WEATHER_EDGE_S
+    readings, complete = [], True
+    seen = {field: [] for field in WEATHER_VARS.values()}
+    totals = {"precip": [], "snow": []}
+    for point, hourly in zip(points, series):
+        times = hourly["time"]
+        nearest = min(range(len(times)), key=lambda i: abs(times[i] - point["ts"]))
+        reading = {field: finite(hourly[var][nearest]) for var, field in WEATHER_VARS.items()}
+        complete = complete and all(v is not None for v in reading.values())
+        readings.append({"role": point["role"], "alt": point["alt"], "ts": point["ts"], **reading})
+        inside = [i for i, t in enumerate(times) if lo <= t <= hi]
+        for var, field in WEATHER_VARS.items():
+            values = [v for v in (finite(hourly[var][i]) for i in inside) if v is not None]
+            seen[field] += values
+            if field in totals and values:
+                totals[field].append(sum(values))
+    span = {}
+    if seen["temp"]:
+        span["tempMin"], span["tempMax"] = min(seen["temp"]), max(seen["temp"])
+    for field in ("wind", "gusts", "code"):
+        if seen[field]:
+            span[field] = max(seen[field])
+    for field, sums in totals.items():
+        if sums:
+            span[field] = round(max(sums), 1)
+    return {"points": readings, "span": span, "complete": complete}
+
+
+def public_weather(cached: dict, tz) -> dict:
+    """Надвор'е дня для індэкса сайта: мясцовы час замест моманту, без службовых палёў кэша."""
+    points = [{**{k: v for k, v in p.items() if k != "ts"}, "time": _clock(p["ts"], tz)} for p in cached["points"]]
+    return {"points": points, "span": cached.get("span") or {}, "fetched": cached.get("fetched")}
+
+
 # --- Месца на трэку -----------------------------------------------------------------
 
 def _position(days: list[dict], di: int, point: tuple, off: float | None = None) -> dict:
@@ -468,7 +546,8 @@ def _amount(value, n_days: int, what: str, warn) -> tuple[list | None, float | N
 
 
 def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n_days: int, end: str, manifest: dict,
-                    photos: list, prev: dict | None, home=None, prev_photos: list | None = None) -> tuple[dict | None, str | None]:
+                    photos: list, prev: dict | None, home=None, prev_photos: list | None = None,
+                    rates: dict | None = None, start: str = "") -> tuple[dict | None, str | None]:
     """Блок `practical:` → (звесткі аўтара для індэкса або None, ручное выпраўленне тыпу маршруту або None).
 
     Няправільнае поле прапускаецца з папярэджаннем і не спыняе зборку.
@@ -578,6 +657,7 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
 
     # --- як дабрацца
     out["gettingThere"] = []
+    no_rate: set[str] = set()
     for i, way in enumerate(_items(block.get("getting_there"), "getting_there", warn), 1):
         what = f"getting_there[{i}]"
         if not isinstance(way, dict):
@@ -586,17 +666,29 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
         date_ = iso_date(way["date"]) if way.get("date") else None
         if way.get("date") and not date_:
             warn(f"{what}: няправільная дата: {way['date']}")
+        price = _number(way.get("price"), f"{what}.price", warn)
+        # Даляры — разлік па афіцыйным курсе на дату цаны (без даты — на дзень пачатку паходу)
+        rate_day = date_ or start
+        rate = (rates or {}).get(rate_day) if price is not None else None
+        if not (isinstance(rate, (int, float)) and not isinstance(rate, bool) and math.isfinite(rate) and rate > 0):
+            if price is not None and rate_day:
+                no_rate.add(rate_day)
+            rate = None
         out["gettingThere"].append({
+            "usd": round(price / rate, 2) if rate else None, "rateDate": rate_day if rate else None,
             "type": _choice(way.get("type"), TRANSPORT_TYPES, f"{what}.type", warn, "other"),
             "from": _text(way.get("from") or home, f"{what}.from", warn),  # home — з config.yaml
             "to": _text(way.get("to"), f"{what}.to", warn),
             "minutes": _travel_minutes(way.get("time"), warn), "km": _number(way.get("km"), f"{what}.km", warn),
-            "price": _number(way.get("price"), f"{what}.price", warn),  # лары
+            "price": price,  # лары
             "priceFor": _choice(way.get("price_for"), ("car", "person"), f"{what}.price_for", warn),
             "trip": _choice(way.get("trip"), ("one_way", "round_trip"), f"{what}.trip", warn),
             "date": date_, "boarding": _text(way.get("boarding"), f"{what}.boarding", warn),
             "road": _text(way.get("road"), f"{what}.road", warn), "note": _text(way.get("note"), f"{what}.note", warn),
         })
+
+    if no_rate:
+        print(f"  · {slug}: няма курсу лары на {', '.join(sorted(no_rate))} — запусціце `hike fetch`")
 
     # --- асаблівыя месцы
     out["places"] = []

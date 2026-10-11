@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -19,6 +19,7 @@ from PIL import Image  # noqa: E402
 
 import build  # noqa: E402
 import common  # noqa: E402
+import fetch  # noqa: E402
 import practical  # noqa: E402
 import scaffold  # noqa: E402
 
@@ -340,9 +341,10 @@ practical:
         out = io.StringIO()
         with unittest.mock.patch("sys.stdout", out):
             parsed, override = practical.parse_practical("h", block, days=[], stats=None, n_days=1, end="2025-06-01",
-                                                         manifest={}, photos=[], prev=None)
+                                                         manifest={}, photos=[], prev=None, rates={"2025-05-17": 2.5})
         problems = [line for line in out.getvalue().splitlines() if "месца не вызначана" not in line]
         self.assertEqual(problems, [], "шаблон з README і чарнавіка разбіраецца без заўваг")
+        self.assertEqual((parsed["gettingThere"][0]["usd"], parsed["gettingThere"][0]["rateDate"]), (32.0, "2025-05-17"))
         self.assertIsNone(override)
         self.assertEqual(set(parsed["notes"]), set(practical.NOTE_KEYS))
         self.assertEqual((parsed["water"]["drunk"], parsed["gettingThere"][0]["minutes"], parsed["places"][0]["type"]),
@@ -731,6 +733,192 @@ practical:
             pos, problem = practical.locate(spec, days, {})
             self.assertIsNone(pos, spec)
             self.assertIn("па-за часам трэку", problem, spec)
+
+
+class FakeResponse:
+    def __init__(self, data, status=200):
+        self.data, self.status_code = data, status
+
+    def json(self):
+        return self.data
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise fetch.requests.HTTPError(f"HTTP {self.status_code}")
+
+
+def hourly_answer(params, hole=None):
+    """Адказ архіва Open-Meteo: па гадзінах для кожнага пункта; тэмпература — нумар гадзіны UTC мінус вышыня/100."""
+    first = datetime.fromisoformat(params["start_date"]).replace(tzinfo=timezone.utc)
+    last = datetime.fromisoformat(params["end_date"]).replace(tzinfo=timezone.utc) + timedelta(hours=23)
+    times = [int(first.timestamp()) + 3600 * i for i in range(int((last - first).total_seconds() // 3600) + 1)]
+    places = []
+    for alt in (float(a) for a in params["elevation"].split(",")):
+        hours = [datetime.fromtimestamp(t, timezone.utc).hour for t in times]
+        hourly = {"time": times, "temperature_2m": [h - alt / 100 for h in hours],
+                  "apparent_temperature": [h - alt / 100 - 1 for h in hours], "precipitation": [0.5 if h == 6 else 0.0 for h in hours],
+                  "snowfall": [0.0] * len(times), "wind_speed_10m": [float(h) for h in hours],
+                  "wind_gusts_10m": [2.0 * h for h in hours], "cloud_cover": [50] * len(times),
+                  "weather_code": [61 if h == 6 else 2 for h in hours]}
+        if hole:
+            hourly[hole] = [None] * len(times)
+        places.append({"elevation": alt, "hourly": hourly})
+    return places if len(places) > 1 else places[0]
+
+
+class TestWeatherAndRates(PracticalProject):
+    """Этап 2: надвор'е з Open-Meteo і курс Нацбанка Грузіі — без сеткі, з падмененымі адказамі."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = unittest.mock.patch.multiple(fetch, CACHE=build.CACHE, CONTENT=self.content, load_config=lambda: self.cfg)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.photos_root.mkdir()
+
+    def fetch(self, argv=(), weather=hourly_answer, rate=2.5):
+        calls = []
+
+        def fake_get(session, url, params=None, timeout=None):
+            calls.append((url, dict(params or {})))
+            if url == fetch.API_RATES:
+                return rate if isinstance(rate, FakeResponse) else FakeResponse(
+                    [{"currencies": [{"code": "USD", "quantity": 1, "rate": rate}]}])
+            answer = weather(params)
+            return answer if isinstance(answer, FakeResponse) else FakeResponse(answer)
+
+        out = io.StringIO()
+        with unittest.mock.patch("requests.Session.get", fake_get), unittest.mock.patch("time.sleep", lambda *a: None), \
+                unittest.mock.patch("sys.stdout", out):
+            fetch.main(list(argv))
+        return calls, out.getvalue()
+
+    def hike(self, extra=""):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))  # 08:00–12:00 мясцовага, 04:00–08:00 UTC
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n" + extra, encoding="utf-8")
+
+    def test_weather_points_and_summary(self):
+        self.hike()
+        day = practical.raw_days([1], 4)[0]
+        points = practical.weather_points(day)
+        self.assertEqual([(q["role"], q["alt"]) for q in points], [("start", 1000), ("top", 1400), ("finish", 1000)])
+        start = datetime(2025, 6, 1, 4, tzinfo=timezone.utc).timestamp()
+        self.assertEqual([q["ts"] - start for q in points], [0, 7200, 14400])
+        self.assertEqual(practical.weather_key(points), practical.weather_key([dict(q) for q in points]))
+        self.assertNotEqual(practical.weather_key(points), practical.weather_key(points[:2]))
+        # трэк без часу або без вышыні
+        self.assertEqual(practical.weather_points({"segs": [[(41.0, 42.0, 1000, None, 0.0), (41.01, 42.0, 1100, None, 1.0)]]}), [])
+        flat = practical.weather_points({"segs": [[(41.0, 42.0, None, 0.0, 0.0), (41.01, 42.0, None, 60.0, 1.0)]]})
+        self.assertEqual([q["role"] for q in flat], ["start", "finish"])
+
+        series = hourly_answer({"start_date": "2025-06-01", "end_date": "2025-06-01", "elevation": "1000,1400,1000"})
+        summary = practical.summarize_weather(points, [place["hourly"] for place in series])
+        self.assertTrue(summary["complete"])
+        self.assertEqual([(q["role"], q["temp"], q["feels"], q["wind"], q["gusts"], q["code"]) for q in summary["points"]],
+                         [("start", -6.0, -7.0, 4.0, 8.0, 2), ("top", -8.0, -9.0, 6.0, 12.0, 61), ("finish", -2.0, -3.0, 8.0, 16.0, 2)])
+        # за час паходу — гадзіны 04:00–08:00 UTC па ўсіх пунктах; ападкі — найбольшая сума сярод пунктаў
+        self.assertEqual(summary["span"], {"tempMin": -10.0, "tempMax": -2.0, "wind": 8.0, "gusts": 16.0, "code": 61,
+                                           "precip": 0.5, "snow": 0.0})
+        holed = hourly_answer({"start_date": "2025-06-01", "end_date": "2025-06-01", "elevation": "1000,1400,1000"}, "wind_gusts_10m")
+        summary = practical.summarize_weather(points, [place["hourly"] for place in holed])
+        self.assertEqual((summary["complete"], summary["points"][0]["gusts"], "gusts" in summary["span"]), (False, None, False))
+        self.assertEqual(summary["points"][0]["temp"], -6.0, "астатнія паказчыкі застаюцца")
+
+    def test_fetch_caches_weather_and_build_publishes_it(self):
+        self.hike()
+        calls, out = self.fetch()
+        self.assertEqual(len(calls), 1)
+        url, params = calls[0]
+        self.assertEqual((url, params["start_date"], params["end_date"], params["timezone"], params["timeformat"]),
+                         (fetch.API_WEATHER, "2025-06-01", "2025-06-01", "GMT", "unixtime"))
+        self.assertEqual((params["latitude"].count(","), params["elevation"]), (2, "1000,1400,1000"))
+        self.assertIn("спампавана дзён 1", out)
+        self.assertEqual(self.fetch()[0], [], "другі запуск нічога не пытае")
+        self.assertEqual(len(self.fetch(["--refresh"])[0]), 1)
+
+        index, out = self.build()
+        day = index["h"]["days"][0]
+        self.assertNotIn("надвор'я няма", out)
+        self.assertEqual([(q["role"], q["time"], q["alt"], q["temp"]) for q in day["weather"]["points"]],
+                         [("start", "08:00", 1000, -6.0), ("top", "10:00", 1400, -8.0), ("finish", "12:00", 1000, -2.0)])
+        self.assertEqual((day["weather"]["span"]["tempMax"], day["weather"]["fetched"]), (-2.0, date.today().isoformat()))
+        self.assertNotIn("ts", day["weather"]["points"][0])
+        self.assertNotIn("key", day["weather"])
+
+        # трэк змяніўся: старое надвор'е да яго не адносіцца
+        self.add_tour(1, "2025-06-01T05:00:00Z", path(*SQUARE))
+        index, out = self.build()
+        self.assertNotIn("weather", index["h"]["days"][0])
+        self.assertIn("надвор'я няма для паходаў: 1 — запусціце `hike fetch`", out)
+        self.assertEqual(len(self.fetch()[0]), 1, "для новага трэку надвор'е пытаецца зноў")
+        self.assertEqual(self.build()[0]["h"]["days"][0]["weather"]["points"][0]["time"], "09:00")
+
+        # тура няма ў кэшы: разам з ранейшым трэкам застаецца і яго надвор'е
+        before = self.build()[0]["h"]["days"]
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        self.assertEqual(self.build()[0]["h"]["days"], before)
+
+    def test_fetch_failures_and_incomplete_answers(self):
+        self.hike()
+        refused = lambda params: FakeResponse({"error": True, "reason": "Parameter 'start_date' is out of allowed range"}, 400)  # noqa: E731
+        calls, out = self.fetch(weather=refused)
+        self.assertIn("надвор'е не атрымана — Parameter 'start_date' is out of allowed range", out)
+        self.assertIn("Не атрымана: 1.", out)
+        self.assertFalse((build.CACHE / "weather" / "h.json").exists())
+        self.assertIn("надвор'я няма для паходаў: 1", self.build()[1])
+
+        calls, out = self.fetch(weather=lambda params: hourly_answer(params, "cloud_cover"))
+        self.assertIn("няпоўныя звесткі", out)
+        cached = common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]
+        self.assertEqual((cached["complete"], cached["points"][0]["cloud"]), (False, None))
+        self.assertIsNone(self.build()[0]["h"]["days"][0]["weather"]["points"][0]["cloud"], "пустое не становіцца нулём")
+        self.assertEqual(len(self.fetch()[0]), 1, "няпоўныя звесткі пытаюцца зноў")
+        self.assertTrue(common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]["complete"])
+        self.assertEqual(self.fetch()[0], [])
+
+        # збой сеткі не сцірае ўжо спампаванае
+        def offline(params):
+            raise fetch.requests.ConnectionError("няма сеткі")
+        calls, out = self.fetch(["--refresh"], weather=offline)
+        self.assertIn("надвор'е не атрымана — няма сеткі", out)
+        self.assertTrue(common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]["complete"])
+
+    def test_prices_get_dollars_at_the_rate_of_their_date(self):
+        self.hike("""\
+practical:
+  getting_there:
+    - {type: taxi, price: 80, date: 2025-05-30}
+    - {type: marshrutka, price: 5}
+    - {type: car, km: 40}
+""")
+        index, out = self.build()
+        self.assertIn("няма курсу лары на 2025-05-30, 2025-06-01 — запусціце `hike fetch`", out)
+        self.assertEqual([w["usd"] for w in index["h"]["practical"]["gettingThere"]], [None, None, None])
+
+        calls, out = self.fetch()
+        rate_calls = [params for url, params in calls if url == fetch.API_RATES]
+        self.assertEqual(rate_calls, [{"currencies": "USD", "date": "2025-05-30"}, {"currencies": "USD", "date": "2025-06-01"}])
+        self.assertIn("Курсаў: 2.", out)
+        self.assertEqual(common.read_json(build.CACHE / "rates.json")["USD"], {"2025-05-30": 2.5, "2025-06-01": 2.5})
+        self.assertEqual([url for url, _ in self.fetch()[0] if url == fetch.API_RATES], [], "курсы ўжо ёсць")
+
+        index, out = self.build()
+        self.assertNotIn("няма курсу", out)
+        taxi, bus, car = index["h"]["practical"]["gettingThere"]
+        self.assertEqual((taxi["price"], taxi["usd"], taxi["rateDate"]), (80.0, 32.0, "2025-05-30"))
+        self.assertEqual((bus["usd"], bus["rateDate"]), (2.0, "2025-06-01"), "без даты — курс на дзень паходу")
+        self.assertEqual((car["usd"], car["rateDate"]), (None, None), "без цаны даляраў няма")
+
+    def test_bad_rate_answers_are_not_stored(self):
+        self.hike("practical:\n  getting_there:\n    - {type: taxi, price: 80}\n")
+        for answer in (FakeResponse([], 200), FakeResponse([{"currencies": [{"code": "USD", "rate": 0}]}]),
+                       FakeResponse([{"currencies": [{"code": "USD", "rate": "nan"}]}]), FakeResponse({}, 500)):
+            calls, out = self.fetch(rate=answer)
+            self.assertIn("Не атрымана: 1.", out)
+            self.assertFalse((build.CACHE / "rates.json").exists())
+        common.write_json(build.CACHE / "rates.json", {"USD": {"2025-06-01": float("inf") if False else -3}})
+        index, out = self.build()
+        self.assertEqual(index["h"]["practical"]["gettingThere"][0]["usd"], None, "няправільны курс з кэша не выкарыстоўваецца")
 
 
 if __name__ == "__main__":

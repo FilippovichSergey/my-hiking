@@ -3,13 +3,15 @@
   komoot   спампаваць туры з Komoot (спытае email і пароль)
   youtube  абнавіць спіс відэа з YouTube-канала
   new      стварыць чарнавікі content/hikes/*.yaml для новых паходаў
+  fetch    спампаваць надвор'е падчас паходаў і курс лары (для практычнай часткі)
   build    сабраць сайт у docs/ (фота, трэкі, даныя)
   serve    запусціць сайт лакальна: http://localhost:8000
 """
 import importlib
 import sys
 
-COMMANDS = {"komoot": "komoot", "youtube": "youtube", "new": "scaffold", "build": "build", "serve": "serve"}
+COMMANDS = {"komoot": "komoot", "youtube": "youtube", "new": "scaffold", "fetch": "fetch", "build": "build",
+            "serve": "serve"}
 
 
 def main() -> None:

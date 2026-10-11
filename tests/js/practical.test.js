@@ -67,3 +67,66 @@ test("выбраны дзень: наяўнасць вады — толькі п
   assert.ok(view(null, [source(1, false)], true).includes(yes), "агульная пазнака аўтара для ўсяго паходу");
   assert.ok(view(1, [], false).includes("Вады на маршруце няма."));
 });
+
+const groupsOf = (nodes) => {
+  const box = document.createElement("div");
+  box.append(...nodes);
+  return [...box.querySelectorAll(".p-group")].map((g) => ({
+    title: g.querySelector("summary").textContent,
+    lines: [...g.querySelectorAll(".p-title, .p-meta, .p-text, .p-note")].map((el) => el.textContent),
+    sources: [...g.querySelectorAll(".p-source")].map((el) => el.textContent),
+  }));
+};
+const MODEL = "Паводле мадэлі Open-Meteo — гэта разлік па сетцы, а не замер на сцежцы";
+
+test("надвор'е: па пунктах для дня, радок на дзень для ўсяго паходу, асобна назіранні аўтара", () => {
+  const point = (role, time, alt, extra) => ({ role, time, alt, temp: 14.6, feels: 14.9, precip: 0, snow: 0, wind: 7.4, gusts: 18.4, cloud: 100, code: 3, ...extra });
+  const rainy = {
+    points: [point("start", "10:33", 867, { precip: 0.6, code: 53 }), point("top", "13:12", 975, { temp: -2.6, feels: -7.4, snow: 1.2, code: 73 }),
+      point("finish", "18:52", 882, { cloud: null, gusts: null })],
+    span: { tempMin: -3.2, tempMax: 15.4, precip: 5.1, snow: 2, wind: 9.7, gusts: 25.6, code: 73 },
+  };
+  const dry = { points: [point("start", "08:00", 500, {})], span: { tempMin: 20.2, tempMax: 20.4, precip: 0, snow: 0, wind: 3 } };
+  const notes = { checked: null, weatherNotes: { be: "На хрыбце туман.", en: "" }, notes: {}, gettingThere: [], places: [], water: null };
+
+  const [one] = groupsOf(renderPractical(hike({ days: [{ date: "2026-07-12", weather: rainy }], practical: notes }), null, () => {}));
+  assert.equal(one.title, "Надвор'еад −3 °C да +15 °C");
+  assert.deepEqual(one.lines, [
+    "Старт · 10:33 · 867 м", "+15 °C · імжа · вецер 7 км/г, парывы 18 · воблачнасць 100 % · ападкі 0,6 мм за гадзіну",
+    "Найвышэйшы пункт · 13:12 · 975 м", "−3 °C, адчуваецца як −7 °C · снег · вецер 7 км/г, парывы 18 · воблачнасць 100 % · снег 1,2 см за гадзіну",
+    "Фініш · 18:52 · 882 м", "+15 °C · пахмурна · вецер 7 км/г",
+    "За час паходу: ад −3 °C да +15 °C · ападкі да 5,1 мм · снег да 2 см · вецер да 10 км/г, парывы да 26",
+    "На хрыбце туман.",
+  ]);
+  assert.deepEqual(one.sources, [MODEL, "Мае назіранні"], "кожная частка падпісана сваёй крыніцай");
+
+  const two = hike({ days: [{ date: "2026-09-12", weather: rainy }, { date: "2026-09-13", weather: dry }] });
+  const [whole] = groupsOf(renderPractical(two, null, () => {}));
+  assert.deepEqual(whole.lines, [
+    "Дзень 1 · 12 верасня: ад −3 °C да +15 °C · ападкі да 5,1 мм · снег да 2 см · вецер да 10 км/г, парывы да 26",
+    "Дзень 2 · 13 верасня: +20 °C · без ападкаў · вецер да 3 км/г",
+  ]);
+  assert.deepEqual(whole.sources, [MODEL]);
+  const [second] = groupsOf(renderPractical(two, 1, () => {}));
+  assert.deepEqual(second.lines, ["Старт · 08:00 · 500 м", "+15 °C · пахмурна · вецер 7 км/г, парывы 18 · воблачнасць 100 %",
+    "За час паходу: +20 °C · без ападкаў · вецер да 3 км/г"]);
+
+  // без мадэлі — толькі назіранні аўтара; без таго і другога групы няма
+  const [own] = groupsOf(renderPractical(hike({ practical: notes }), null, () => {}));
+  assert.deepEqual([own.lines, own.sources], [["На хрыбце туман."], ["Мае назіранні"]]);
+  assert.equal(renderPractical(hike({ days: [{ date: "2026-07-12" }] }), null, () => {}), null);
+});
+
+test("як дабрацца: цана ў лары і разлік у далярах з датай курсу", () => {
+  const way = (extra) => ({ type: "taxi", from: { be: "Батумі", en: "" }, to: { be: "Мілісі", en: "" }, minutes: null, km: null,
+    price: null, priceFor: null, trip: null, date: null, boarding: { be: "", en: "" }, road: { be: "", en: "" }, note: { be: "", en: "" },
+    usd: null, rateDate: null, ...extra });
+  const view = (ways) => groupsOf(renderPractical(hike({
+    practical: { checked: null, weatherNotes: null, notes: {}, gettingThere: ways, places: [], water: null },
+  }), null, () => {}))[0];
+  const priced = view([way({ price: 80, priceFor: "car", usd: 30.76, rateDate: "2026-10-10" }), way({ type: "marshrutka", price: 5, usd: 1.92, rateDate: "2026-10-10" })]);
+  assert.deepEqual(priced.lines, ["Таксі · Батумі → Мілісі", "80 ₾ (≈ 31 $), за машыну", "Маршрутка · Батумі → Мілісі", "5 ₾ (≈ 1,9 $)"]);
+  assert.deepEqual(priced.sources, ["Мае назіранні", "Даляры — разлік па курсе Нацбанка Грузіі на 10 кастрычніка 2026"]);
+  const plain = view([way({ price: 80 })]);
+  assert.deepEqual([plain.lines[1], plain.sources], ["80 ₾", ["Мае назіранні"]], "без курсу — толькі лары");
+});

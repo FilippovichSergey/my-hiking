@@ -573,6 +573,8 @@ def main(argv=None) -> None:
 
     # Усе апісанні чытаюцца да пачатку працы: памылка ў адным файле спыняе зборку, пакуль нічога не зменена.
     sources = [(path.stem, load_yaml(path)) for path in sorted(CONTENT.glob("*.yaml"))]
+    usd_rates = read_json(CACHE / "rates.json", {}).get("USD") or {}  # лары за 1 даляр па датах (`hike fetch`)
+    no_weather: set[str] = set()
     hikes = []
     for slug, h in sources:
         if h.get("hidden"):
@@ -605,8 +607,15 @@ def main(argv=None) -> None:
             "minAlt": min((d["minAlt"] for d in days if d["minAlt"] is not None), default=None),
         } if days else None
         if raw and len(raw) == len(days):
+            weather = read_json(CACHE / "weather" / f"{slug}.json", {}).get("days") or {}
             for day, raw_day in zip(days, raw):
                 day["facts"] = practical.day_facts(raw_day, day)
+                # Надвор'е спампоўвае `hike fetch`; яно паказваецца, толькі калі адносіцца да гэтага трэку.
+                points, cached = practical.weather_points(raw_day), weather.get(day["date"])
+                if points and cached and cached.get("key") == practical.weather_key(points):
+                    day["weather"] = practical.public_weather(cached, raw_day["tz"])
+                elif points:
+                    no_weather.add(slug)
             facts = practical.hike_facts(raw, [d["facts"] for d in days], stats)
 
         start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
@@ -647,7 +656,8 @@ def main(argv=None) -> None:
         notes, type_override = practical.parse_practical(
             slug, h.get("practical"), days=raw, stats=stats, n_days=len(days) or calendar_days(start, end), end=end,
             manifest=read_manifest(slug), photos=photos, prev=(prev or {}).get("practical"),
-            home=(cfg.get("home") or {}).get("name"), prev_photos=(prev or {}).get("photos"))
+            home=(cfg.get("home") or {}).get("name"), prev_photos=(prev or {}).get("photos"),
+            rates=usd_rates, start=start)
         if type_override:  # разлічаны тып застаецца ў typeCalc: выпраўленне можна будзе зняць і без кэша тураў
             facts = {**(facts or {}), "typeCalc": (facts or {}).get("type"), "type": type_override, "typeBy": "author"}
         videos = []
@@ -688,6 +698,8 @@ def main(argv=None) -> None:
     # Новы індэкс запісаны — цяпер можна прыбраць файлы, на якія ён ужо не спасылаецца.
     _remove(pending)
     (DOCS / ".nojekyll").touch()
+    if no_weather:
+        print(f"  · надвор'я няма для паходаў: {len(no_weather)} — запусціце `hike fetch`")
     n_photos = sum(len(h["photos"]) for h in hikes)
     print(f"Гатова: паходаў {len(hikes)}, фота {n_photos} → docs/data/hikes.json")
 
