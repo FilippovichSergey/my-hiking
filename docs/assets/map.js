@@ -269,6 +269,15 @@ export function createMap(el, { onSelect, popupExtra }) {
     if (slug && hikesBySlug.has(slug)) map.setFeatureState({ source: "lines", id: slug }, { hover: true });
   }
 
+  /**
+   * Трэкі астатніх паходаў відаць толькі ў спісе. Пры адкрытым паходзе на карце застаецца адзін яго трэк:
+   * у адной мясцовасці бывае некалькі паходаў, і побач з бягучым іх трэкі выглядалі як яго часткі.
+   * Самі паходы застаюцца маркерамі — па іх можна перайсці да іншага паходу.
+   */
+  function showOtherTracks(on) {
+    for (const id of ["lines", "lines-casing"]) map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
+  }
+
   // --- Публічнае API ---
   const api = {
     updateControls,
@@ -305,8 +314,9 @@ export function createMap(el, { onSelect, popupExtra }) {
     select(hike, track, day, fit = true) {
       selectedSlug = hike.slug;
       selection = { hike, track, day };
-      map.setPaintProperty("lines", "line-opacity", 0.45);
-      map.setPaintProperty("lines-casing", "line-opacity", 0.35);
+      showOtherTracks(false);
+      highlight(null); // схаваная лінія ўжо не атрымае mouseleave
+      map.getCanvas().style.cursor = "";
       const features = (track?.days || []).map((d, i) => ({
         type: "Feature",
         properties: { color: cssVar(`--series-${(i % 8) + 1}`), dim: day != null && day !== i },
@@ -329,8 +339,7 @@ export function createMap(el, { onSelect, popupExtra }) {
     clearSelection() {
       selectedSlug = null;
       selection = null;
-      map.setPaintProperty("lines", "line-opacity", 1);
-      map.setPaintProperty("lines-casing", "line-opacity", 0.8);
+      showOtherTracks(true);
       map.getSource("selected").setData(EMPTY);
       map.getSource("hover").setData(EMPTY);
       setPois([]);

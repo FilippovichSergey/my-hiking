@@ -21,6 +21,7 @@ class FakeMap {
   constructor(opts) {
     FakeMap.last = this;
     this.handlers = {};
+    this.layout = {}; // уласцівасці слаёў, зададзеныя праз setLayoutProperty: { слой: { уласцівасць: значэнне } }
     this.sources = Object.fromEntries(Object.keys(opts.style.sources).map((id) => [id, new FakeSource(id)]));
     setTimeout(() => this.fire("styledata"), 0);
   }
@@ -31,7 +32,8 @@ class FakeMap {
   getCanvas() { return { style: {} }; }
   getBearing() { return 0; }
   getZoom() { return this.zoom ?? 12; }
-  addControl() {} setLayoutProperty() {} setPaintProperty() {} setFeatureState() {}
+  addControl() {} setPaintProperty() {} setFeatureState() {}
+  setLayoutProperty(id, prop, value) { (this.layout[id] ||= {})[prop] = value; }
   fitBounds(...args) { (this.fits ||= []).push(args); }
   flyTo() {} easeTo() {} resize() {} setTerrain() {} setSky() {}
 }
@@ -624,4 +626,26 @@ test("кропкі на карце, падказкі OpenStreetMap, дарога
     delete guria.drive;
     delete slow.hints;
   }
+});
+
+test("пры адкрытым паходзе на карце застаецца толькі яго трэк", async () => {
+  const shown = () => ["lines", "lines-casing"].map((id) => FakeMap.last.layout[id]?.visibility);
+  await go("#/be");
+  assert.deepEqual(shown(), ["visible", "visible"], "у спісе відаць трэкі ўсіх паходаў");
+
+  await go("#/be/guria");
+  await waitFor(() => panel().querySelector(".detail h1")?.textContent === "guria", "старонка паходу");
+  assert.deepEqual(shown(), ["none", "none"], "трэкі астатніх паходаў схаваныя: бягучы не зблытаць з суседнімі");
+  assert.equal(FakeMap.last.sources.selected.data.features.length, 1, "трэк бягучага паходу на месцы");
+  assert.ok(FakeMap.last.sources.hikes.data.features.length > 1, "астатнія паходы застаюцца маркерамі");
+
+  await go("#/en/guria"); // змена мовы перамалёўвае старонку
+  await waitFor(() => document.documentElement.lang === "en", "англійская мова");
+  assert.deepEqual(shown(), ["none", "none"]);
+  await go("#/be/notrack"); // паход без трэку — суседнія трэкі таксама не паказваюцца
+  await waitFor(() => panel().querySelector(".detail h1")?.textContent === "notrack", "паход без трэку");
+  assert.deepEqual(shown(), ["none", "none"]);
+
+  await go("#/be");
+  assert.deepEqual(shown(), ["visible", "visible"], "пасля вяртання да спіса трэкі зноў відаць");
 });
