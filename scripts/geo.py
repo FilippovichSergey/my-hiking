@@ -27,14 +27,14 @@ GEOCODE_CACHE = CACHE / "geocode.json"
 _last_request = 0.0
 
 
-def _nominatim(lat: float, lng: float, lang: str) -> dict:
+def _nominatim(lat: float, lng: float, lang: str, zoom: int = 5) -> dict:
     global _last_request
     wait = 1.1 - (time.time() - _last_request)  # ліміт Nominatim: 1 запыт у секунду
     if wait > 0:
         time.sleep(wait)
     r = requests.get(
         "https://nominatim.openstreetmap.org/reverse",
-        params={"lat": lat, "lon": lng, "zoom": 5, "format": "jsonv2", "addressdetails": 1, "accept-language": lang},
+        params={"lat": lat, "lon": lng, "zoom": zoom, "format": "jsonv2", "addressdetails": 1, "accept-language": lang},
         headers={"User-Agent": "my-hiking-site/0.1 (personal hiking map)"},
         timeout=30,
     )
@@ -85,6 +85,34 @@ def place_name(lat: float, lng: float) -> str:
             return ""
         cache[key] = next((addr[k] for k in ("village", "hamlet", "town", "city", "suburb", "municipality",
                                               "county") if addr.get(k)), "")
+        write_json(GEOCODE_CACHE, cache)
+    return cache[key]
+
+
+_SETTLEMENT = ("village", "hamlet", "town", "city", "suburb")  # муніцыпалітэт — не населены пункт: рэгіён ужо паказаны
+
+
+def names_key(lat: float, lng: float) -> str:
+    """Ключ назвы населенага пункта ў кэшы геакадавання (каля 100 м дакладнасці)."""
+    return f"names:{lat:.3f},{lng:.3f}"
+
+
+def place_names(lat: float, lng: float) -> dict | None:
+    """Бліжэйшы населены пункт на дзвюх мовах {be, en} — для старту і фінішу. Патрэбна сетка; вынік у кэшы.
+
+    Беларускай назвы ў OpenStreetMap часта няма — тады бярэцца англійская (а не руская). None — сэрвіс не адказаў.
+    """
+    key = names_key(lat, lng)
+    cache = read_json(GEOCODE_CACHE, {})
+    if key not in cache:
+        try:
+            found = [str(next((addr[k] for k in _SETTLEMENT if addr.get(k)), "")).strip()
+                     for addr in (_nominatim(lat, lng, "be,en", 14), _nominatim(lat, lng, "en", 14))]
+        except (requests.RequestException, ValueError, AttributeError) as exc:
+            print(f"  ! назва месца для {lat:.3f}, {lng:.3f} не вызначана: {exc}")
+            return None
+        cache = read_json(GEOCODE_CACHE, {})
+        cache[key] = {"be": found[0] or found[1], "en": found[1] or found[0]}
         write_json(GEOCODE_CACHE, cache)
     return cache[key]
 

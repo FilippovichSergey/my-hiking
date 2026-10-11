@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from common import CACHE, has_track, iso_date, photo_name, read_json, text_pair, tour_local_datetime
-from geo import haversine
+from geo import EARTH_R, haversine
 
 ROUTE_TYPES = ("loop", "out_and_back", "point_to_point", "mixed")
 SOURCE_TYPES = ("spring", "tap", "well", "stream", "other")
@@ -32,7 +32,7 @@ CLOSED_GAP_SHARE = 0.25   # …але не больш за чвэрць даўж
 LOOP_MAX_OVERLAP = 0.35   # кола: двойчы пройдзена не больш за траціну (агульны падыход)
 BACK_MIN_OVERLAP = 0.70   # туды і назад: двойчы пройдзена амаль усё
 NEAR_M, APART_M, STEP_M = 30.0, 500.0, 30.0
-DAYS_JOINED_M = 1000      # дні шматдзённага паходу ідуць адзін за адным, калі начлег у тым жа месцы
+DAYS_JOINED_M = 1000      # туры і дні ідуць адзін за адным, калі наступны пачынаецца там, дзе скончыўся папярэдні
 STEEP_WINDOW_KM = 0.5
 PHOTO_TOLERANCE_S = 1800  # фота, зробленае да паўгадзіны да старту або пасля фінішу, яшчэ адносіцца да трэку
 
@@ -79,15 +79,23 @@ def _clock(ts: float | None, tz) -> str | None:
 # --- Тып маршруту -----------------------------------------------------------------
 
 def _resample(points: list[tuple]) -> tuple[list[tuple], float]:
-    """Пункты праз кожныя ~STEP_M метраў: (lat, lng, адлегласць ад пачатку ў метрах) і агульная даўжыня."""
-    out, since, total = [(points[0][0], points[0][1], 0.0)], 0.0, 0.0
+    """Выбарка роўна праз STEP_M метраў шляху і канцавы пункт: (lat, lng, адлегласць ад пачатку ў метрах);
+    агульная даўжыня. На доўгім адрэзку пункты ставяцца па прамой, рэшта кроку пераходзіць на наступны адрэзак:
+    вынік не залежыць ад таго, наколькі часта запісаны трэк.
+    """
+    out, total, need = [(points[0][0], points[0][1], 0.0)], 0.0, STEP_M  # need — метраў да наступнага пункта
     for a, b in zip(points, points[1:]):
         d = haversine(a[0], a[1], b[0], b[1])
+        done = 0.0
+        while d - done >= need:
+            done += need
+            part = done / d
+            out.append((a[0] + (b[0] - a[0]) * part, a[1] + (b[1] - a[1]) * part, total + done))
+            need = STEP_M
+        need -= d - done
         total += d
-        since += d
-        if since >= STEP_M:
-            out.append((b[0], b[1], total))
-            since = 0.0
+    if total - out[-1][2] > 1e-6:
+        out.append((points[-1][0], points[-1][1], total))
     return out, total
 
 
@@ -126,16 +134,30 @@ def route_type(points: list[tuple]) -> str | None:
     return "out_and_back" if share >= BACK_MIN_OVERLAP else "mixed"
 
 
+def parts_route_type(parts: list[list[tuple]]) -> str | None:
+    """Тып маршруту з некалькіх частак па парадку — тураў дня або ўсіх тураў паходу.
+
+    Частка, якая пачынаецца там, дзе скончылася папярэдняя (да DAYS_JOINED_M: перапынак у запісе, начлег),
+    працягвае той жа маршрут. Пасля пераезду пачынаецца асобная вылазка: пераезд — не частка пешага шляху.
+    Некалькі вылазак маюць агульны тып, калі ён у іх аднолькавы, інакш — «змешаны».
+    """
+    walks: list[list[tuple]] = []
+    for part in parts:
+        if not part:
+            continue
+        if walks and haversine(walks[-1][-1][0], walks[-1][-1][1], part[0][0], part[0][1]) <= DAYS_JOINED_M:
+            walks[-1] = walks[-1] + list(part)
+        else:
+            walks.append(list(part))
+    known = {t for t in map(route_type, walks) if t}
+    return known.pop() if len(known) == 1 else ("mixed" if known else None)
+
+
 def hike_route_type(days: list[dict], day_types: list) -> str | None:
-    """Тып усяго паходу. Дні з начлегам у адным месцы — адзін маршрут; асобныя вылазкі — агульны тып дзён."""
+    """Тып усяго паходу. Дні з начлегам у адным месцы — адзін маршрут; асобныя вылазкі — агульны тып."""
     if len(days) == 1:
         return day_types[0]
-    pts = [_points(d) for d in days]
-    joined = all(haversine(a[-1][0], a[-1][1], b[0][0], b[0][1]) <= DAYS_JOINED_M for a, b in zip(pts, pts[1:]))
-    if joined:
-        return route_type([p for day in pts for p in day])
-    known = {t for t in day_types if t}
-    return known.pop() if len(known) == 1 else ("mixed" if known else None)
+    return parts_route_type([seg for day in days for seg in day["segs"]])
 
 
 # --- Сонца ------------------------------------------------------------------------
@@ -180,22 +202,26 @@ def _minutes(clock: str) -> int:
 
 # --- Разлікі па трэку ---------------------------------------------------------------
 
-def _steepest(points: list[tuple]) -> tuple[dict | None, dict | None]:
-    """Найкруцейшыя пад'ём і спуск на адрэзку STEEP_WINDOW_KM: ({grade %, km пачатку}, {…})."""
-    pts = [(p[4], p[2]) for p in points if p[2] is not None]
+def _steepest(segs: list[list[tuple]]) -> tuple[dict | None, dict | None]:
+    """Найкруцейшыя пад'ём і спуск на адрэзку STEEP_WINDOW_KM: ({grade %, km пачатку}, {…}).
+
+    Акно не пераходзіць з тура ў тур: паміж турамі дня можа быць пераезд, і розніца вышынь там — не ўхіл сцежкі.
+    """
     up = down = None
-    j = 0
-    for i, (km, alt) in enumerate(pts):
-        j = max(j, i)
-        while j < len(pts) and pts[j][0] - km < STEEP_WINDOW_KM:
-            j += 1
-        if j >= len(pts):
-            break
-        grade = (pts[j][1] - alt) / ((pts[j][0] - km) * 1000) * 100
-        if grade > 0 and (up is None or grade > up["grade"]):
-            up = {"grade": grade, "km": km}
-        if grade < 0 and (down is None or -grade > down["grade"]):
-            down = {"grade": -grade, "km": km}
+    for seg in segs:
+        pts = [(p[4], p[2]) for p in seg if p[2] is not None]
+        j = 0
+        for i, (km, alt) in enumerate(pts):
+            j = max(j, i)
+            while j < len(pts) and pts[j][0] - km < STEEP_WINDOW_KM:
+                j += 1
+            if j >= len(pts):
+                break
+            grade = (pts[j][1] - alt) / ((pts[j][0] - km) * 1000) * 100
+            if grade > 0 and (up is None or grade > up["grade"]):
+                up = {"grade": grade, "km": km}
+            if grade < 0 and (down is None or -grade > down["grade"]):
+                down = {"grade": -grade, "km": km}
     fmt = lambda s: {"grade": round(s["grade"]), "km": round(s["km"], 1)} if s and round(s["grade"]) >= 1 else None  # noqa: E731
     return fmt(up), fmt(down)
 
@@ -220,7 +246,7 @@ def _pace(stats: dict) -> dict:
 def day_facts(day: dict, stats: dict) -> dict:
     """Разлік па трэку для аднаго дня: тып, старт і фініш, светлавы дзень, тэмп, рэльеф."""
     pts = _points(day)
-    facts = {"type": route_type(pts), "start": _end(pts[0], day["tz"]), "finish": _end(pts[-1], day["tz"])}
+    facts = {"type": parts_route_type(day["segs"]), "start": _end(pts[0], day["tz"]), "finish": _end(pts[-1], day["tz"])}
     sun = sun_moments(date.fromisoformat(day["date"]), pts[0][0], pts[0][1], day["tz"])
     if sun:
         facts["sun"] = {"rise": _hhmm(sun[0]), "set": _hhmm(sun[1])}
@@ -231,7 +257,7 @@ def day_facts(day: dict, stats: dict) -> dict:
             # таму фініш пасля поўначы — гэта «пасля заходу», а не «амаль цэлы дзень святла».
             facts["sun"]["left"] = round((sun[1].timestamp() - pts[-1][3]) / 60)
     facts.update(_pace(stats))
-    up, down = _steepest(pts)
+    up, down = _steepest(day["segs"])
     if up:
         facts["steepUp"] = up
     if down:
@@ -280,9 +306,22 @@ def weather_points(day: dict) -> list[dict]:
              "alt": round(p[2]) if p[2] is not None else None, "ts": round(p[3])} for role, p in chosen]
 
 
+WEATHER_FORMAT = 3  # змяняецца разам з правіламі падліку ў summarize_weather: старыя падлікі пытаюцца зноў
+
+
 def weather_key(points: list[dict]) -> str:
     """Подпіс запыту: калі трэк змяніўся, раней спампаванае надвор'е да яго ўжо не адносіцца."""
-    return hashlib.sha1(json.dumps(points, sort_keys=True).encode()).hexdigest()[:12]
+    return hashlib.sha1(json.dumps([WEATHER_FORMAT, points], sort_keys=True).encode()).hexdigest()[:12]
+
+
+def weather_hours(points: list[dict]) -> range:
+    """Гадзіны сэрвісу (секунды UTC), патрэбныя для дня: ад паўгадзіны да старту да паўгадзіны пасля фінішу.
+
+    Па іх `hike fetch` выбірае даты запыту, а summarize_weather правярае паўнату адказу: фініш пасля 23:30 UTC
+    патрабуе гадзіну 00:00 наступнай даты.
+    """
+    lo, hi = points[0]["ts"] - WEATHER_EDGE_S, points[-1]["ts"] + WEATHER_EDGE_S
+    return range(math.ceil(lo / 3600) * 3600, math.floor(hi) + 1, 3600)
 
 
 def summarize_weather(points: list[dict], series: list[dict]) -> dict:
@@ -290,24 +329,34 @@ def summarize_weather(points: list[dict], series: list[dict]) -> dict:
 
     points — значэнні бліжэйшай гадзіны да моманту, калі аўтар быў у пункце; span — межы за ўвесь час паходу
     па ўсіх пунктах (ападкі і снег — найбольшая сума сярод пунктаў). Пустое значэнне сэрвісу застаецца пустым,
-    а не нулём; тады complete = False і `hike fetch` паспрабуе яшчэ раз.
+    а не нулём; тады complete = False і `hike fetch` паспрабуе яшчэ раз. Гэта датычыць і кожнай гадзіны паходу:
+    сума ападкаў з прапушчанай гадзінай не публікуецца — інакш сухія вядомыя гадзіны давалі б «без ападкаў».
+    Прапушчанай лічыцца і гадзіна, якой у адказе няма зусім; паказчык пункта бярэцца толькі з яго гадзіны.
     """
     def finite(value):
         return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
 
     lo, hi = points[0]["ts"] - WEATHER_EDGE_S, points[-1]["ts"] + WEATHER_EDGE_S
+    grid = set(weather_hours(points))
     readings, complete = [], True
     seen = {field: [] for field in WEATHER_VARS.values()}
     totals = {"precip": [], "snow": []}
+    holes = set()  # паказчыкі, у якіх за час паходу ёсць прапушчаная гадзіна
     for point, hourly in zip(points, series):
         times = hourly["time"]
+        if grid - set(times):
+            holes.update(WEATHER_VARS.values())  # у адказе няма цэлай гадзіны паходу
         nearest = min(range(len(times)), key=lambda i: abs(times[i] - point["ts"]))
-        reading = {field: finite(hourly[var][nearest]) for var, field in WEATHER_VARS.items()}
+        own = abs(times[nearest] - point["ts"]) <= WEATHER_EDGE_S  # інакш гэта паказчык іншай гадзіны
+        reading = {field: finite(hourly[var][nearest]) if own else None for var, field in WEATHER_VARS.items()}
         complete = complete and all(v is not None for v in reading.values())
         readings.append({"role": point["role"], "alt": point["alt"], "ts": point["ts"], **reading})
         inside = [i for i, t in enumerate(times) if lo <= t <= hi]
         for var, field in WEATHER_VARS.items():
-            values = [v for v in (finite(hourly[var][i]) for i in inside) if v is not None]
+            hours = [finite(hourly[var][i]) for i in inside]
+            values = [v for v in hours if v is not None]
+            if len(values) < len(hours):
+                holes.add(field)
             seen[field] += values
             if field in totals and values:
                 totals[field].append(sum(values))
@@ -318,9 +367,9 @@ def summarize_weather(points: list[dict], series: list[dict]) -> dict:
         if seen[field]:
             span[field] = max(seen[field])
     for field, sums in totals.items():
-        if sums:
+        if sums and field not in holes:
             span[field] = round(max(sums), 1)
-    return {"points": readings, "span": span, "complete": complete}
+    return {"points": readings, "span": span, "complete": complete and not holes}
 
 
 def public_weather(cached: dict, tz) -> dict:
@@ -329,7 +378,226 @@ def public_weather(cached: dict, tz) -> dict:
     return {"points": points, "span": cached.get("span") or {}, "fetched": cached.get("fetched")}
 
 
+# --- Падказкі OpenStreetMap і дарога на машыне (спампоўвае `hike fetch`) ---------------
+
+OSM_WATER_M, OSM_PLACE_M = 250, 150  # наколькі далёка ад трэку паказваць ваду і іншыя месцы
+OSM_SAME_M, OSM_SAME_KM = 60, 0.1    # падказка побач з запісам аўтара таго ж роду (або на тым жа кіламетры) — тое самае
+OSM_MAX = 40                         # не больш падказак на паход
+OSM_THIN_KM, OSM_THIN_M = 0.05, 60   # грубы адбор: трэк з пунктамі праз ~50 м адыходзіць ад сапраўднага не больш чым на 50 м
+DRIVE_BACK_M = 2000                  # фініш далей за гэта ад старту — лічыцца і дарога ад фінішу
+
+
+def osm_bbox(days: list[dict]) -> list[float] | None:
+    """[поўдзень, захад, поўнач, усход] трэку з запасам — вобласць пошуку ў OpenStreetMap."""
+    pts = [p for day in days for p in _points(day)]
+    if not pts:
+        return None
+    pad = 0.004  # каля 400 м
+    return [round(min(p[0] for p in pts) - pad, 3), round(min(p[1] for p in pts) - pad, 3),
+            round(max(p[0] for p in pts) + pad, 3), round(max(p[1] for p in pts) + pad, 3)]
+
+
+OSM_FORMAT = 2  # змяняецца разам з правіламі адбору ў osm_item: аб'екты адбіраюцца пры спампоўцы
+
+
+def osm_key(bbox: list[float]) -> str:
+    return hashlib.sha1(json.dumps([OSM_FORMAT, bbox, OSM_QUERY]).encode()).hexdigest()[:12]
+
+
+# Што шукаць: крыніцы вады і месцы, якія аўтар пазначае ў `practical:` (альтанкі, вогнішчы, начоўкі…).
+OSM_QUERY = (
+    'node["amenity"~"^(drinking_water|water_point)$"]', 'node["natural"="spring"]', 'node["man_made"="water_well"]',
+    'nwr["amenity"~"^(shelter|toilets)$"]', 'nwr["tourism"~"^(picnic_site|camp_site|wilderness_hut|alpine_hut|viewpoint)$"]',
+    'node["leisure"~"^(firepit|picnic_table)$"]', 'node["information"="guidepost"]',
+)
+
+
+def overpass_query(bboxes: list[list[float]]) -> str:
+    """Адзін запыт Overpass на некалькі абласцей (публічны сервер абмяжоўвае колькасць запытаў, а не іх памер)."""
+    parts = "".join(f"{sel}({','.join(str(v) for v in box)});" for box in bboxes for sel in OSM_QUERY)
+    return f"[out:json][timeout:120];({parts});out center tags;"
+
+
+def osm_inside(item: dict, bbox: list[float]) -> bool:
+    return bbox[0] <= item["lat"] <= bbox[2] and bbox[1] <= item["lng"] <= bbox[3]
+
+
+def osm_item(element: dict) -> dict | None:
+    """Аб'ект OpenStreetMap → падказка {kind, type, name, lat, lng, osm}; None для таго, што не паказваецца."""
+    tags = element.get("tags") or {}
+    lat = element.get("lat", (element.get("center") or {}).get("lat"))
+    lng = element.get("lon", (element.get("center") or {}).get("lon"))
+    if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+        return None
+    if tags.get("access") in ("private", "no", "customers") or tags.get("shelter_type") == "public_transport":
+        return None  # прыватнае або прыпынак транспарту
+    kinds = {
+        ("amenity", "drinking_water"): ("water", "tap"), ("amenity", "water_point"): ("water", "tap"),
+        ("natural", "spring"): ("water", "spring"), ("man_made", "water_well"): ("water", "well"),
+        ("amenity", "shelter"): ("place", "shelter"), ("amenity", "toilets"): ("place", "toilet"),
+        ("tourism", "picnic_site"): ("place", "table"), ("leisure", "picnic_table"): ("place", "table"),
+        ("tourism", "camp_site"): ("place", "camp"), ("tourism", "wilderness_hut"): ("place", "camp"),
+        ("tourism", "alpine_hut"): ("place", "camp"), ("tourism", "viewpoint"): ("place", "viewpoint"),
+        ("leisure", "firepit"): ("place", "firepit"), ("information", "guidepost"): ("place", "signpost"),
+    }
+    found = next((kinds[(k, tags[k])] for k in ("amenity", "natural", "man_made", "tourism", "leisure", "information")
+                  if (k, tags.get(k)) in kinds), None)
+    if not found:
+        return None
+    if found[0] == "water" and tags.get("drinking_water") == "no":
+        return None  # вада пазначана як непітная — якім бы ні быў аб'ект
+    name = str(tags.get("name") or "").strip()
+    return {"kind": found[0], "type": found[1], "lat": round(lat, 5), "lng": round(lng, 5),
+            "name": {"be": str(tags.get("name:be") or name).strip(), "en": str(tags.get("name:en") or name).strip()},
+            "osm": f"{element.get('type', 'node')}/{element.get('id')}"}
+
+
+def osm_hints(items: list[dict], days: list[dict], author: dict | None) -> list[dict]:
+    """Падказкі каля трэку: з месцам на ім, без тых, што аўтар ужо пазначыў сам. Не праверана аўтарам."""
+    if not days or not items:
+        return []
+    # грубы адбор па разрэджаным трэку (пункт на кожныя ~50 м шляху, канцы тураў застаюцца), потым дакладнае месца
+    thin = []
+    for day in days:
+        segs = []
+        for seg in day["segs"]:
+            kept: list[tuple] = []
+            for i, p in enumerate(seg):
+                if not kept or abs(p[4] - kept[-1][4]) >= OSM_THIN_KM or i == len(seg) - 1:
+                    kept.append(p)
+            segs.append(kept)
+        thin.append({"segs": segs})
+    # запісы аўтара: любая яго крыніца вады супадае з вадой з OSM, месца — толькі таго ж тыпу
+    own = [("water", None, s["pos"]) for s in ((author or {}).get("water") or {}).get("sources") or [] if s.get("pos")]
+    own += [("place", s.get("type"), s["pos"]) for s in (author or {}).get("places") or [] if s.get("pos")]
+    hints = []
+    for item in items:
+        limit = OSM_WATER_M if item["kind"] == "water" else OSM_PLACE_M
+        near = _project(item["lat"], item["lng"], thin)
+        if near is None or near[0] > limit + OSM_THIN_M:
+            continue
+        pos, _ = locate({"at": [item["lat"], item["lng"]]}, days, {})
+        if pos is None or pos.get("off", 0) > limit:
+            continue
+        if any(kind == item["kind"] and type_ in (None, item["type"])
+               and (haversine(item["lat"], item["lng"], mine["at"][1], mine["at"][0]) <= OSM_SAME_M
+                    or (mine["day"] == pos["day"] and abs(mine["km"] - pos["km"]) <= OSM_SAME_KM))
+               for kind, type_, mine in own):
+            continue  # аўтар ужо пазначыў гэтае месца сам
+        pos.pop("time", None)  # час праходу побач — не час наведвання
+        hints.append({"kind": item["kind"], "type": item["type"], "name": item["name"], "osm": item["osm"], "pos": pos})
+    hints.sort(key=lambda h: (h["pos"]["day"], h["pos"]["km"], h["osm"]))
+    # некалькі аднолькавых аб'ектаў побач (сталы на адной пляцоўцы) — адна падказка; з назвай — важнейшая
+    kept: list[dict] = []
+    for hint in hints:
+        at = hint["pos"]["at"]
+        twin = next((k for k in kept if (k["kind"], k["type"]) == (hint["kind"], hint["type"])
+                     and haversine(at[1], at[0], k["pos"]["at"][1], k["pos"]["at"][0]) <= OSM_SAME_M), None)
+        if twin is None:
+            kept.append(hint)
+        elif not any(twin["name"].values()) and any(hint["name"].values()):
+            kept[kept.index(twin)] = hint
+    return kept[:OSM_MAX]
+
+
+def home_point(home) -> tuple | None:
+    """Пункт `home.point` з config.yaml як (шырата, даўгата); None, калі яго няма або ён няправільны."""
+    point = home.get("point") if isinstance(home, dict) else None
+    try:
+        lat, lng = float(point[0]), float(point[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+    return (lat, lng) if math.isfinite(lat) and math.isfinite(lng) and abs(lat) <= 90 and abs(lng) <= 180 else None
+
+
+def drive_key(home: tuple, target: tuple, back: bool = False) -> str:
+    """Ключ маршруту на машыне ў кэшы «адкуль>куды»: (шырата, даўгата) дома і пункта трэку; back — ад пункта дадому."""
+    a, b = f"{home[0]:.4f},{home[1]:.4f}", f"{target[0]:.3f},{target[1]:.3f}"
+    return f"{b}>{a}" if back else f"{a}>{b}"
+
+
+def drive_targets(days: list[dict]) -> dict:
+    """Куды лічыць дарогу: да старту (to), а калі фініш далёка ад яго — яшчэ і ад фінішу (back)."""
+    if not days:
+        return {}
+    first, last = _points(days[0])[0], _points(days[-1])[-1]
+    targets = {"to": (first[0], first[1])}
+    if haversine(first[0], first[1], last[0], last[1]) > DRIVE_BACK_M:
+        targets["back"] = (last[0], last[1])
+    return targets
+
+
+def drive_info(routes: dict, home, days: list[dict]) -> dict | None:
+    """Дарога на машыне для індэкса: {from, to: {km, minutes, off?}, back?} з таго, што ёсць у кэшы."""
+    point = home_point(home)
+    if not point:
+        return None
+    keys = {name: drive_key(point, target, name == "back") for name, target in drive_targets(days).items()}
+    found = {name: routes[key] for name, key in keys.items() if isinstance(routes.get(key), dict)}
+    if "to" not in found:
+        return None
+    return {"from": _text(home.get("name"), "home.name", lambda message: None), **found}
+
+
 # --- Месца на трэку -----------------------------------------------------------------
+
+def _project(lat: float, lng: float, days: list[dict], only: int | None = None) -> tuple | None:
+    """Найбліжэйшае да каардынат месца трэку: (адхіленне ў метрах, індэкс дня, пункт (lat, lng, alt, ts, km)).
+
+    Шукаецца праекцыя на адрэзкі паміж суседнімі пунктамі кожнага тура, а не найбліжэйшы пункт: на разрэджаным
+    трэку месца проста на сцежцы інакш лічылася б далёкім. Разрыў паміж турамі — не адрэзак маршруту.
+    Вышыня, час і кіламетр — па прамой паміж канцамі адрэзка. None, калі ў трэку няма пунктаў.
+    """
+    scale = math.pi / 180 * EARTH_R
+    cos0 = math.cos(math.radians(lat))
+    best = None
+    for di, day in enumerate(days):
+        if only is not None and di != only:
+            continue
+        for seg in day["segs"]:
+            before = None
+            for p in seg:
+                x, y = (p[1] - lng) * cos0 * scale, (p[0] - lat) * scale  # метры ад шуканага месца
+                if before is None:
+                    found = (x * x + y * y, di, p, p, 0.0)
+                else:
+                    ax, ay, a = before
+                    dx, dy = x - ax, y - ay
+                    length2 = dx * dx + dy * dy
+                    part = max(0.0, min(1.0, -(ax * dx + ay * dy) / length2)) if length2 else 0.0
+                    cx, cy = ax + part * dx, ay + part * dy
+                    found = (cx * cx + cy * cy, di, a, p, part)
+                if best is None or found[0] < best[0]:
+                    best = found
+                before = (x, y, p)
+    if best is None:
+        return None
+    d2, di, a, b, part = best
+    return math.sqrt(d2), di, _between(a, b, part)
+
+
+def _between(a: tuple, b: tuple, part: float) -> tuple:
+    """Пункт (lat, lng, alt, ts, km) на долі `part` адрэзка ад a да b — па прамой."""
+    def mix(i: int):
+        if a[i] is None or b[i] is None:
+            return a[i] if part < 0.5 else b[i]  # значэнне ёсць толькі на адным канцы адрэзка
+        return a[i] + (b[i] - a[i]) * part
+
+    return tuple(mix(i) for i in range(5))
+
+
+def _at_km(day: dict, km: float) -> tuple:
+    """Пункт дня на кіламетры `km`: па прамой паміж суседнімі пунктамі аднаго тура — трэк можа быць разрэджаны.
+
+    На мяжы тураў (кіламетр у іх агульны) — канец ранейшага тура; кіламетр за фінішам — апошні пункт.
+    """
+    for seg in day["segs"]:
+        if seg and seg[0][4] <= km <= seg[-1][4]:
+            i = bisect.bisect_left([p[4] for p in seg], km)
+            a, b = seg[max(i - 1, 0)], seg[i]
+            return _between(a, b, (km - a[4]) / (b[4] - a[4]) if b[4] > a[4] else 1.0)
+    return min(_points(day), key=lambda p: abs(p[4] - km))
+
 
 def _position(days: list[dict], di: int, point: tuple, off: float | None = None) -> dict:
     pos = {"day": di, "km": round(point[4], 1), "at": [round(point[1], 5), round(point[0], 5)],
@@ -387,8 +655,10 @@ def locate(spec: dict, days: list[dict], photo_times: dict) -> tuple[dict | None
                 raise ValueError
         except (TypeError, ValueError, IndexError, KeyError):
             return None, f"няправільныя каардынаты at: {spec['at']} (трэба [шырата, даўгата])"
-        d, di, point = min(((haversine(lat, lng, p[0], p[1]), di, p) for di, dd in enumerate(days)
-                            if only is None or di == only for p in _points(dd)), key=lambda x: x[0])
+        found = _project(lat, lng, days, only)
+        if found is None:
+            return None, "няма трэку"
+        d, di, point = found
         pos = _position(days, di, point, d)
         pos["at"] = [round(lng, 5), round(lat, 5)]  # кропка на карце — сапраўднае месца, а не праекцыя на трэк
         return pos, None
@@ -436,7 +706,7 @@ def locate(spec: dict, days: list[dict], photo_times: dict) -> tuple[dict | None
     pts = _points(days[di])
     if not 0 <= value <= pts[-1][4] + 0.3:
         return None, f"кіламетр km: {value} па-за трэкам дня {di + 1} (0–{pts[-1][4]:.1f} км)"
-    return _position(days, di, min(pts, key=lambda p: abs(p[4] - value))), None
+    return _position(days, di, _at_km(days[di], value)), None
 
 
 def find_photo(name, keys) -> tuple[str | None, list[str]]:
@@ -547,10 +817,12 @@ def _amount(value, n_days: int, what: str, warn) -> tuple[list | None, float | N
 
 def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n_days: int, end: str, manifest: dict,
                     photos: list, prev: dict | None, home=None, prev_photos: list | None = None,
-                    rates: dict | None = None, start: str = "") -> tuple[dict | None, str | None]:
+                    rates: dict | None = None, start: str = "", track_kept: bool = False) -> tuple[dict | None, str | None]:
     """Блок `practical:` → (звесткі аўтара для індэкса або None, ручное выпраўленне тыпу маршруту або None).
 
     Няправільнае поле прапускаецца з папярэджаннем і не спыняе зборку.
+    track_kept — пунктаў трэку няма (тура няма ў кэшы), але на сайце застаецца ранейшы трэк: месцы запісаў
+    бяруцца з папярэдняга індэкса. Калі трэку ў паходу больш няма, няма і месцаў на ім.
     """
     if block is None:
         return None, None
@@ -581,6 +853,8 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
             if item.get("ref"):
                 old[item["ref"]] = (item.get("pos"), photo_name(prev_photos[index]) if known else None)
 
+    has_track = bool(days) or track_kept  # ёсць трэк: пункты для разліку або ранейшы апублікаваны
+
     def placed(spec: dict, what: str) -> dict:
         """Агульныя палі запісу з месцам: фота, дата назірання, заўвага і месца на трэку."""
         item = {"note": _text(spec.get("note"), f"{what}.note", warn), "seen": None, "photo": None, "ref": _ref(spec),
@@ -603,9 +877,9 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
         waiting = by_photo and (key in unread or kept)
         if by_photo and lost:
             pos, problem = None, photo_problem(spec["photo"], candidates)  # ні фота, ні месца
-        elif was_pos and (not days or waiting):
+        elif was_pos and ((not days and track_kept) or (waiting and has_track)):
             pos, problem = was_pos, None  # крыніцы для разліку няма: месца з папярэдняга індэкса
-        elif waiting:
+        elif waiting and has_track:
             pos, problem = None, f"час здымкі фота {spec['photo']} яшчэ не прачытаны (тэчка з фота недаступная)"
         else:
             pos, problem = locate(spec, days, photo_times)

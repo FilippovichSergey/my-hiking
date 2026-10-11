@@ -22,7 +22,7 @@ from PIL import Image, ImageOps
 import practical
 from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, photo_name, read_version, load_yaml, read_json, site_photos_dir, slugify,
                     text_pair, tour_local_datetime, write_json)
-from geo import haversine, simplify
+from geo import haversine, names_key, simplify
 
 PILLOW_EXT = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 MAGICK_EXT = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
@@ -574,7 +574,10 @@ def main(argv=None) -> None:
     # Усе апісанні чытаюцца да пачатку працы: памылка ў адным файле спыняе зборку, пакуль нічога не зменена.
     sources = [(path.stem, load_yaml(path)) for path in sorted(CONTENT.glob("*.yaml"))]
     usd_rates = read_json(CACHE / "rates.json", {}).get("USD") or {}  # лары за 1 даляр па датах (`hike fetch`)
+    drive_routes = read_json(CACHE / "routes.json", {}).get("routes") or {}  # дарога на машыне ад home
+    place_cache = read_json(CACHE / "geocode.json", {})                      # назвы населеных пунктаў
     no_weather: set[str] = set()
+    no_services: set[str] = set()
     hikes = []
     for slug, h in sources:
         if h.get("hidden"):
@@ -593,10 +596,10 @@ def main(argv=None) -> None:
                   f"(запусціце `hike komoot{' --refresh' if empty else ''}`)")
             # Геаметрыя ранейшая, а спасылкі — толькі на туры, якія дагэтуль публічныя.
             days, lines, track = current_links(prev["days"], tours_meta), prev["lines"], prev["track"]
-            raw, facts = [], calculated_facts(prev)  # разлік па трэку — таксама ранейшы
+            raw, facts, kept_track = [], calculated_facts(prev), True  # разлік па трэку — таксама ранейшы
         else:
             days, lines, track = build_tracks(slug, tour_ids, offset, tours_meta)
-            raw, facts = practical.raw_days(tour_ids, offset), None
+            raw, facts, kept_track = practical.raw_days(tour_ids, offset), None, False
         stats = {
             "distance": round(sum(d["distance"] for d in days), 2),
             "up": sum(d["up"] for d in days),
@@ -617,6 +620,13 @@ def main(argv=None) -> None:
                 elif points:
                     no_weather.add(slug)
             facts = practical.hike_facts(raw, [d["facts"] for d in days], stats)
+            # Назвы населеных пунктаў каля старту і фінішу — з таго, што спампаваў `hike fetch`.
+            for item, first, last in [(facts, raw[0], raw[-1])] + [(d["facts"], r, r) for d, r in zip(days, raw)]:
+                for edge, p in (("start", practical._points(first)[0]), ("finish", practical._points(last)[-1])):
+                    names = place_cache.get(names_key(p[0], p[1]))
+                    if isinstance(names, dict) and (names.get("be") or names.get("en")):
+                        item[edge] = {**item[edge], "place": {"be": names.get("be") or names["en"],
+                                                              "en": names.get("en") or names["be"]}}
 
         start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
         if not start:
@@ -657,7 +667,22 @@ def main(argv=None) -> None:
             slug, h.get("practical"), days=raw, stats=stats, n_days=len(days) or calendar_days(start, end), end=end,
             manifest=read_manifest(slug), photos=photos, prev=(prev or {}).get("practical"),
             home=(cfg.get("home") or {}).get("name"), prev_photos=(prev or {}).get("photos"),
-            rates=usd_rates, start=start)
+            rates=usd_rates, start=start, track_kept=kept_track)
+        # Падказкі з OpenStreetMap і дарога на машыне — з таго, што спампаваў `hike fetch`, і толькі калі яны
+        # адносяцца да гэтага трэку. Апублікаваныя раней застаюцца толькі разам з ранейшым трэкам (тура няма
+        # ў кэшы); калі трэку ў паходу больш няма, няма і звестак, якія ад яго залежаць.
+        if raw:
+            osm = read_json(CACHE / "osm" / f"{slug}.json", {})
+            fresh = osm.get("key") == practical.osm_key(practical.osm_bbox(raw))
+            hints = practical.osm_hints(osm.get("items") or [], raw, notes) if fresh else []
+            drive = practical.drive_info(drive_routes, cfg.get("home"), raw)
+            wanted = practical.drive_targets(raw) if practical.home_point(cfg.get("home")) else {}
+            if not fresh or any(name not in (drive or {}) for name in wanted):
+                no_services.add(slug)
+        elif kept_track:
+            hints, drive = (prev or {}).get("hints") or [], (prev or {}).get("drive")
+        else:
+            hints, drive = [], None
         if type_override:  # разлічаны тып застаецца ў typeCalc: выпраўленне можна будзе зняць і без кэша тураў
             facts = {**(facts or {}), "typeCalc": (facts or {}).get("type"), "type": type_override, "typeBy": "author"}
         videos = []
@@ -675,6 +700,8 @@ def main(argv=None) -> None:
             "stats": stats,
             "facts": facts,          # разлік па трэку: тып маршруту, старт і фініш, светлавы дзень, тэмп
             "practical": notes,      # звесткі аўтара з блока practical:
+            "hints": hints,          # месцы з OpenStreetMap каля трэку — не правераныя аўтарам
+            "drive": drive,          # дарога на машыне ад home — разлік сэрвісу маршрутаў
             "days": days,
             "point": point,
             "bbox": bbox,
@@ -700,6 +727,8 @@ def main(argv=None) -> None:
     (DOCS / ".nojekyll").touch()
     if no_weather:
         print(f"  · надвор'я няма для паходаў: {len(no_weather)} — запусціце `hike fetch`")
+    if no_services:
+        print(f"  · падказак OpenStreetMap або дарогі на машыне няма для паходаў: {len(no_services)} — запусціце `hike fetch`")
     n_photos = sum(len(h["photos"]) for h in hikes)
     print(f"Гатова: паходаў {len(hikes)}, фота {n_photos} → docs/data/hikes.json")
 

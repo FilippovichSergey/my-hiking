@@ -1,6 +1,7 @@
 // Карта MapLibre: падкладкі (тапа / спадарожнік / схема), 3D-рэльеф, маркеры і трэкі паходаў.
 import { cssVar, h } from "./dom.js";
 import { dateRange, pick, t } from "./i18n.js";
+import { poiIcon } from "./pois.js";
 
 const OSM = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 const BASES = {
@@ -33,6 +34,7 @@ const EMPTY = { type: "FeatureCollection", features: [] };
 // Фіялетавы не зліваецца з колерамі тапакарты (зеляніна, карычневыя/аранжавыя горы, блакітная вада).
 const HIKE_COLOR = "#7c3aed";
 const CLUSTER_COLOR = "#5b21b6";
+const HINTS_MIN_ZOOM = 11; // падказкі OpenStreetMap паказваюцца, калі карта наблізіцца (іх бывае шмат)
 
 function fitPadding() {
   return innerWidth > 760 ? { top: 50, bottom: 50, left: 50, right: 150 } : 36;
@@ -236,6 +238,31 @@ export function createMap(el, { onSelect, popupExtra }) {
     map.easeTo({ center: f.geometry.coordinates, zoom });
   });
 
+  // --- Крыніцы вады і месцы выбранага паходу ---
+  let poiMarkers = [];
+  const poiPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: true, offset: 16 });
+  const farHints = () => el.classList.toggle("hints-far", map.getZoom() < HINTS_MIN_ZOOM);
+  map.on("zoom", farHints);
+
+  function setPois(items) {
+    poiPopup.remove();
+    poiMarkers.forEach((m) => m.remove());
+    poiMarkers = items.map((it) => {
+      const show = () => poiPopup.setLngLat(it.at).setDOMContent(h("div", null,
+        h("div", { class: "popup-title" }, it.title),
+        h("div", { class: "popup-meta" }, it.where),
+        h("div", { class: "popup-source" }, it.source))).addTo(map);
+      const hide = () => poiPopup.remove();
+      const badge = h("button", {
+        type: "button", class: `poi poi-${it.kind}${it.hint ? " poi-hint" : ""}`, "aria-label": it.title,
+        onmouseenter: show, onmouseleave: hide, onfocus: show, onblur: hide,
+        onclick: (e) => { e.stopPropagation(); show(); }, // дотык: падказка застаецца да націскання на карту
+      }, poiIcon(it.kind, it.type));
+      return new maplibregl.Marker({ element: badge }).setLngLat(it.at).addTo(map);
+    });
+    farHints();
+  }
+
   function highlight(slug) {
     if (hoveredSlug) map.setFeatureState({ source: "lines", id: hoveredSlug }, { hover: false });
     hoveredSlug = slug;
@@ -306,7 +333,11 @@ export function createMap(el, { onSelect, popupExtra }) {
       map.setPaintProperty("lines-casing", "line-opacity", 0.8);
       map.getSource("selected").setData(EMPTY);
       map.getSource("hover").setData(EMPTY);
+      setPois([]);
     },
+
+    /** Кропкі выбранага паходу (гл. hikePois): запісы аўтара і бляднейшыя падказкі OpenStreetMap. */
+    setPois,
 
     setHoverPoint(p, color) {
       map.getSource("hover").setData(p ? {
@@ -329,7 +360,7 @@ export function createMap(el, { onSelect, popupExtra }) {
   // (Не чакаем падзеі load — яна прыходзіць толькі пасля ўсіх плітак, а OpenTopoMap бывае павольны.)
   let ready = false;
   const queue = [];
-  for (const name of ["setHikes", "fitHikes", "select", "clearSelection", "setHoverPoint", "highlight", "refreshTheme"]) {
+  for (const name of ["setHikes", "fitHikes", "select", "clearSelection", "setPois", "setHoverPoint", "highlight", "refreshTheme"]) {
     const fn = api[name];
     api[name] = (...args) => (ready ? fn.apply(api, args) : queue.push(() => fn.apply(api, args)));
   }

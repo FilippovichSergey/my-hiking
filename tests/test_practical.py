@@ -2,6 +2,7 @@
 
 Запуск з кораня праекта:  python -B -m unittest discover -s tests -q
 """
+import hashlib
 import io
 import json
 import os
@@ -20,6 +21,7 @@ from PIL import Image  # noqa: E402
 import build  # noqa: E402
 import common  # noqa: E402
 import fetch  # noqa: E402
+import geo  # noqa: E402
 import practical  # noqa: E402
 import scaffold  # noqa: E402
 
@@ -87,15 +89,16 @@ class PracticalProject(unittest.TestCase):
         self.content.mkdir(parents=True)
         self.cfg = {**CFG, "photos_root": str(self.photos_root)}
         self._saved = (build.CACHE, build.DOCS, build.CONTENT, build.load_config, practical.CACHE,
-                       scaffold.CONTENT, scaffold.CACHE, scaffold.load_config)
+                       scaffold.CONTENT, scaffold.CACHE, scaffold.load_config, geo.GEOCODE_CACHE)
         build.CACHE = practical.CACHE = scaffold.CACHE = self.root / "cache"
+        geo.GEOCODE_CACHE = self.root / "cache" / "geocode.json"
         build.DOCS = self.root / "docs"
         build.CONTENT = scaffold.CONTENT = self.content
         build.load_config = scaffold.load_config = lambda: self.cfg
 
     def tearDown(self):
         (build.CACHE, build.DOCS, build.CONTENT, build.load_config, practical.CACHE,
-         scaffold.CONTENT, scaffold.CACHE, scaffold.load_config) = self._saved
+         scaffold.CONTENT, scaffold.CACHE, scaffold.load_config, geo.GEOCODE_CACHE) = self._saved
         self.tmp.cleanup()
 
     def add_tour(self, tid, iso, points, **stats):
@@ -692,7 +695,8 @@ practical:
             out = io.StringIO()
             with unittest.mock.patch("sys.stdout", out):
                 parsed, _ = practical.parse_practical("h", block, days=[], stats=None, n_days=1, end="2025-06-01",
-                                                      manifest={}, photos=photos, prev=prev, prev_photos=[a, b])
+                                                      manifest={}, photos=photos, prev=prev, prev_photos=[a, b],
+                                                      track_kept=True)
             return parsed["places"][0], out.getvalue()
 
         place, out = parse([b, a])  # парадак галерэі змяніўся
@@ -766,8 +770,13 @@ def hourly_answer(params, hole=None):
     return places if len(places) > 1 else places[0]
 
 
-class TestWeatherAndRates(PracticalProject):
-    """Этап 2: надвор'е з Open-Meteo і курс Нацбанка Грузіі — без сеткі, з падмененымі адказамі."""
+ROUTE = {"code": "Ok", "routes": [{"distance": 42060.0, "duration": 3760.0}],  # Батумі → Мілісі паводле OSRM
+         "waypoints": [{"distance": 12.0}, {"distance": 40.0}]}
+NAMES = {"be": "Мілісі", "en": "Milisi"}
+
+
+class FetchProject(PracticalProject):
+    """Часовы праект для `hike fetch`: знешнія сэрвісы падмененыя, сеткі няма."""
 
     def setUp(self):
         super().setUp()
@@ -776,26 +785,50 @@ class TestWeatherAndRates(PracticalProject):
         self.addCleanup(patcher.stop)
         self.photos_root.mkdir()
 
-    def fetch(self, argv=(), weather=hourly_answer, rate=2.5):
-        calls = []
+    def fetch(self, argv=(), weather=hourly_answer, rate=2.5, osm=(), route=ROUTE, names=NAMES):
+        """Запуск `hike fetch` з падмененымі сэрвісамі. Вяртае запыты надвор'я і курсаў і тое, што надрукавана;
+        усе запыты (з Overpass, OSRM і Nominatim) — у self.calls як (сэрвіс, падрабязнасці)."""
+        calls, self.calls = [], []
 
-        def fake_get(session, url, params=None, timeout=None):
-            calls.append((url, dict(params or {})))
-            if url == fetch.API_RATES:
-                return rate if isinstance(rate, FakeResponse) else FakeResponse(
-                    [{"currencies": [{"code": "USD", "quantity": 1, "rate": rate}]}])
-            answer = weather(params)
+        def respond(answer, *args):
+            answer = answer(*args) if callable(answer) else answer
             return answer if isinstance(answer, FakeResponse) else FakeResponse(answer)
 
+        def fake_get(session, url, params=None, timeout=None):
+            if url.startswith(fetch.API_ROUTE):
+                self.calls.append(("route", url[len(fetch.API_ROUTE):]))
+                return respond(route, url)
+            calls.append((url, dict(params or {})))
+            self.calls.append(("rate" if url == fetch.API_RATES else "weather", dict(params or {})))
+            if url == fetch.API_RATES:
+                return respond(rate if isinstance(rate, FakeResponse) else
+                               [{"currencies": [{"code": "USD", "quantity": 1, "rate": rate}]}])
+            return respond(weather, params)
+
+        def fake_post(session, url, data=None, timeout=None):
+            self.calls.append(("osm", data["data"]))
+            return respond({"elements": list(osm)} if isinstance(osm, (list, tuple)) else osm, data["data"])
+
+        def fake_nominatim(lat, lng, lang, zoom=5):
+            self.calls.append(("names", (round(lat, 3), round(lng, 3), lang, zoom)))
+            answer = names(lat, lng, lang) if callable(names) else names
+            return {"village": answer["en" if lang == "en" else "be"]} if answer else {}
+
         out = io.StringIO()
-        with unittest.mock.patch("requests.Session.get", fake_get), unittest.mock.patch("time.sleep", lambda *a: None), \
-                unittest.mock.patch("sys.stdout", out):
+        with unittest.mock.patch("requests.Session.get", fake_get), unittest.mock.patch("requests.Session.post", fake_post), \
+                unittest.mock.patch.object(geo, "_nominatim", fake_nominatim), \
+                unittest.mock.patch("time.sleep", lambda *a: None), unittest.mock.patch("sys.stdout", out):
             fetch.main(list(argv))
         return calls, out.getvalue()
 
     def hike(self, extra=""):
         self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))  # 08:00–12:00 мясцовага, 04:00–08:00 UTC
         (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n" + extra, encoding="utf-8")
+
+
+
+class TestWeatherAndRates(FetchProject):
+    """Этап 2: надвор'е з Open-Meteo і курс Нацбанка Грузіі — без сеткі, з падмененымі адказамі."""
 
     def test_weather_points_and_summary(self):
         self.hike()
@@ -919,6 +952,632 @@ practical:
         common.write_json(build.CACHE / "rates.json", {"USD": {"2025-06-01": float("inf") if False else -3}})
         index, out = self.build()
         self.assertEqual(index["h"]["practical"]["gettingThere"][0]["usd"], None, "няправільны курс з кэша не выкарыстоўваецца")
+
+
+def osm_node(i, north, east, **tags):
+    """Аб'ект OpenStreetMap за `north` і `east` метраў ад пачатку тэставых трэкаў."""
+    return {"type": "node", "id": i, "lat": 41.0 + north * M, "lon": 42.0 + east * M / 0.7547, "tags": tags}
+
+
+SPRING = osm_node(1, 500, -100, natural="spring", name="Цёплая", **{"name:en": "Warm"})  # 100 м збоку ад 0,5 км
+VIEW = osm_node(2, 1000, 500, tourism="viewpoint")                                       # на трэку, 1,5 км
+NO_ROUTE = {"code": "NoRoute", "routes": []}
+
+
+class TestHintsAndDrive(FetchProject):
+    """Этап 3: падказкі OpenStreetMap, дарога на машыне і назвы населеных пунктаў."""
+
+    def kinds(self):
+        return [kind for kind, _ in self.calls]
+
+    def test_osm_objects_become_typed_hints(self):
+        item = lambda **tags: practical.osm_item({"type": "node", "id": 7, "lat": 41.123456789, "lon": 42.0, "tags": tags})  # noqa: E731
+        kind = lambda **tags: (lambda it: it and (it["kind"], it["type"]))(item(**tags))  # noqa: E731
+        self.assertEqual(item(amenity="drinking_water", name="Кран", **{"name:en": "Tap", "name:be": "Крынічка"}),
+                         {"kind": "water", "type": "tap", "lat": 41.12346, "lng": 42.0, "osm": "node/7",
+                          "name": {"be": "Крынічка", "en": "Tap"}})
+        self.assertEqual(item(natural="spring")["name"], {"be": "", "en": ""})
+        self.assertEqual(item(natural="spring", name="წყარო")["name"], {"be": "წყარო", "en": "წყარო"}, "без перакладу — мясцовая назва")
+        self.assertEqual([kind(natural="spring"), kind(man_made="water_well"), kind(amenity="water_point"), kind(amenity="shelter"),
+                          kind(tourism="camp_site"), kind(tourism="wilderness_hut"), kind(leisure="firepit"),
+                          kind(leisure="picnic_table"), kind(information="guidepost", tourism="information"), kind(amenity="toilets")],
+                         [("water", "spring"), ("water", "well"), ("water", "tap"), ("place", "shelter"), ("place", "camp"),
+                          ("place", "camp"), ("place", "firepit"), ("place", "table"), ("place", "signpost"), ("place", "toilet")])
+        # не паказваецца: прыватнае, прыпынак транспарту, непітная вада, іншыя аб'екты, аб'ект без каардынат
+        for tags in ({"natural": "spring", "access": "private"}, {"amenity": "toilets", "access": "customers"},
+                     {"amenity": "shelter", "shelter_type": "public_transport"}, {"natural": "spring", "drinking_water": "no"},
+                     {"amenity": "bench"}, {}):
+            self.assertIsNone(item(**tags), tags)
+        self.assertIsNone(practical.osm_item({"type": "way", "id": 1, "tags": {"tourism": "camp_site"}}))
+        way = practical.osm_item({"type": "way", "id": 9, "center": {"lat": 41.5, "lon": 42.5}, "tags": {"tourism": "camp_site"}})
+        self.assertEqual((way["lat"], way["lng"], way["osm"]), (41.5, 42.5, "way/9"), "плошча — па цэнтры")
+
+    def test_fetch_stores_hints_drive_and_names_and_build_publishes_them(self):
+        self.hike()
+        index, out = self.build()
+        self.assertEqual((index["h"]["hints"], index["h"]["drive"]), ([], None))
+        self.assertNotIn("place", index["h"]["facts"]["start"])
+        self.assertIn("падказак OpenStreetMap або дарогі на машыне няма для паходаў: 1 — запусціце `hike fetch`", out)
+
+        far = osm_node(3, 500, -300, amenity="drinking_water")  # у вобласці запыту, але за 300 м ад трэку
+        stop = osm_node(4, 0, 10, amenity="shelter", shelter_type="public_transport")
+        _, out = self.fetch(osm=[VIEW, far, stop, SPRING])
+        self.assertEqual(sorted(self.kinds()), ["names", "names", "osm", "route", "weather"])
+        calls = dict(self.calls)
+        bbox = practical.osm_bbox(practical.raw_days([1], 4))
+        self.assertEqual(bbox, [40.996, 41.996, 41.013, 42.016])
+        self.assertIn('node["natural"="spring"](40.996,41.996,41.013,42.016);', calls["osm"])
+        self.assertTrue(calls["osm"].startswith("[out:json]") and calls["osm"].endswith("out center tags;"))
+        self.assertEqual(calls["route"], "41.59822,41.62692;42.0,41.0", "ад парку да старту: даўгата,шырата")
+        self.assertEqual([c for kind, c in self.calls if kind == "names"], [(41.0, 42.0, "be,en", 14), (41.0, 42.0, "en", 14)])
+        for line in ("OpenStreetMap — 3 аб'ектаў у вобласці трэку", "на машыне да старту 42.1 км, 63 хв",
+                     "OpenStreetMap: паходаў 1. Маршрутаў на машыне: 1. Назваў месцаў: 1."):
+            self.assertIn(line, out)
+        self.assertNotIn("Не атрымана", out)
+        self.fetch()
+        self.assertEqual(self.calls, [], "другі запуск нічога не пытае")
+        self.fetch(["--refresh"], osm=[VIEW, SPRING])
+        self.assertEqual(sorted(self.kinds()), ["osm", "route", "weather"], "назвы месцаў не перапытваюцца")
+
+        index, out = self.build()
+        h = index["h"]
+        self.assertNotIn("запусціце `hike fetch`", out)
+        self.assertEqual(h["hints"], [
+            {"kind": "water", "type": "spring", "name": {"be": "Цёплая", "en": "Warm"}, "osm": "node/1",
+             "pos": {"day": 0, "km": 0.5, "at": [round(42.0 - 100 * M / 0.7547, 5), round(41.0 + 500 * M, 5)], "alt": 1100, "off": 100}},
+            {"kind": "place", "type": "viewpoint", "name": {"be": "", "en": ""}, "osm": "node/2",
+             "pos": {"day": 0, "km": 1.5, "at": [round(42.0 + 500 * M / 0.7547, 5), round(41.0 + 1000 * M, 5)], "alt": 1300}},
+        ], "па парадку ўздоўж трэку, без часу праходу")
+        self.assertEqual(h["drive"], {"from": {"be": "Батумі, парк Качынскіх", "en": "Batumi, Kaczyński Park"},
+                                      "to": {"km": 42.1, "minutes": 63}})
+        for facts in (h["facts"], h["days"][0]["facts"]):
+            self.assertEqual((facts["start"]["place"], facts["finish"]["place"]), (NAMES, NAMES))
+            self.assertEqual(facts["start"]["at"], [42.0, 41.0], "астатні разлік не зменены")
+        self.assertEqual(h["bbox"][:2], [42.0, 41.0], "вобласць пошуку падказак не падмяняе межы трэку")
+
+    def test_authors_records_replace_matching_hints(self):
+        shelter = osm_node(5, 1000, 520, amenity="shelter")  # за 20 м ад агляднай пляцоўкі, але іншага тыпу
+        self.hike("""\
+practical:
+  water:
+    sources:
+      - {type: tap, km: 0.5}
+  places:
+      - {type: viewpoint, at: [%.6f, %.6f]}
+""" % (41.0 + 1010 * M, 42.0 + 500 * M / 0.7547))
+        self.fetch(osm=[SPRING, VIEW, shelter])
+        hints = self.build()[0]["h"]["hints"]
+        self.assertEqual([(q["kind"], q["type"]) for q in hints], [("place", "shelter")],
+                         "крыніца на тым жа кіламетры і пляцоўка побач ужо пазначаныя аўтарам")
+        # без запісаў аўтара — усе тры
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+        self.assertEqual(len(self.build()[0]["h"]["hints"]), 3)
+
+    def test_hints_follow_the_track(self):
+        self.hike()
+        self.fetch(osm=[SPRING, VIEW])
+        before = self.build()[0]["h"]
+        self.assertEqual(len(before["hints"]), 2)
+
+        # тура няма ў кэшы: разам з ранейшым трэкам застаюцца яго падказкі і дарога
+        tour = build.CACHE / "komoot" / "tours" / "1.json"
+        saved = tour.read_text(encoding="utf-8")
+        tour.unlink()
+        kept = self.build()[0]["h"]
+        self.assertEqual((kept["hints"], kept["drive"], kept["facts"]), (before["hints"], before["drive"], before["facts"]))
+        tour.write_text(saved, encoding="utf-8")
+
+        # трэк у іншым месцы: спампаванае да яго не адносіцца
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*[(n + 5000, e) for n, e in SQUARE]))
+        index, out = self.build()
+        self.assertEqual((index["h"]["hints"], index["h"]["drive"]), ([], None))
+        self.assertNotIn("place", index["h"]["facts"]["start"])
+        self.assertIn("падказак OpenStreetMap або дарогі на машыне няма для паходаў: 1", out)
+        self.fetch(osm=[osm_node(6, 5500, 0, natural="spring")])
+        self.assertEqual(sorted(self.kinds()), ["names", "names", "osm", "route", "weather"], "для новага трэку ўсё пытаецца зноў")
+        index, out = self.build()
+        self.assertEqual([(q["osm"], q["pos"]["km"]) for q in index["h"]["hints"]], [("node/6", 0.5)])
+        self.assertIsNotNone(index["h"]["drive"])
+
+    def test_long_route_gets_drive_back_and_days_keep_their_hints(self):
+        # два дні: 3 км на поўнач і яшчэ 3 км далей; фініш за 6 км ад старту
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (3000, 0)))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path((3000, 0), (6000, 0)))
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1, 2]\n", encoding="utf-8")
+        names = lambda lat, lng, lang: {"be": f"Вёска {round((lat - 41.0) / M / 1000)}", "en": f"Village {round((lat - 41.0) / M / 1000)}"}  # noqa: E731
+        routes = iter([ROUTE, {"code": "Ok", "routes": [{"distance": 12449.0, "duration": 1500.0}], "waypoints": [{"distance": 1234.0}, {"distance": 5.0}]}])
+        self.fetch(osm=[osm_node(1, 1000, 50, natural="spring"), osm_node(2, 5000, -40, leisure="firepit")],
+                   route=lambda url: next(routes), names=names)
+        self.assertEqual(self.kinds().count("route"), 2, "да старту і ад далёкага фінішу")
+        self.assertEqual(self.kinds().count("names"), 6, "тры розныя пункты: старт, начлег, фініш")
+        h = self.build()[0]["h"]
+        self.assertEqual(h["drive"]["to"], {"km": 42.1, "minutes": 63})
+        self.assertEqual(h["drive"]["back"], {"km": 12.4, "minutes": 25, "off": 1200}, "дарога не даходзіць да фінішу 1,2 км")
+        self.assertEqual([(q["type"], q["pos"]["day"], q["pos"]["km"], q["pos"]["off"]) for q in h["hints"]],
+                         [("spring", 0, 1.0, 50), ("firepit", 1, 2.0, 40)])
+        self.assertEqual([(d["facts"]["start"]["place"]["be"], d["facts"]["finish"]["place"]["en"]) for d in h["days"]],
+                         [("Вёска 0", "Village 3"), ("Вёска 3", "Village 6")])
+        self.assertEqual((h["facts"]["start"]["place"]["be"], h["facts"]["finish"]["place"]["be"]), ("Вёска 0", "Вёска 6"))
+
+    def test_several_hikes_share_one_osm_request(self):
+        self.hike()
+        self.add_tour(2, "2025-07-01T04:00:00Z", path(*[(n + 20000, e) for n, e in SQUARE]))
+        (self.content / "k.yaml").write_text("date: 2025-07-01\ntitle: {be: K}\nkomoot: [2]\n", encoding="utf-8")
+        there = osm_node(8, 20500, 0, amenity="drinking_water")
+        self.fetch(osm=[SPRING, there])
+        self.assertEqual(self.kinds().count("osm"), 1, "сервер абмяжоўвае частату запытаў: паходы пытаюцца разам")
+        self.assertEqual(dict(self.calls)["osm"].count('node["natural"="spring"]('), 2)
+        index = self.build()[0]
+        self.assertEqual([[q["osm"] for q in index[slug]["hints"]] for slug in ("h", "k")], [["node/1"], ["node/8"]],
+                         "кожнаму паходу — толькі аб'екты з яго вобласці")
+        with unittest.mock.patch.object(fetch, "OSM_BATCH", 1):
+            self.fetch(["--refresh"], osm=[SPRING, there])
+        self.assertEqual(self.kinds().count("osm"), 2)
+
+    def test_service_failures_keep_what_was_fetched(self):
+        self.hike()
+        busy = FakeResponse({}, 429)
+        _, out = self.fetch(osm=busy, route=NO_ROUTE, names=lambda *a: (_ for _ in ()).throw(fetch.requests.ConnectionError("няма сеткі")))
+        self.assertEqual(self.kinds().count("osm"), 3, "заняты сервер пытаецца яшчэ двойчы")
+        for line in ("OpenStreetMap не адказаў (паходаў: 1) — HTTP 429", "назва месца для 41.000, 42.000 не вызначана: няма сеткі",
+                     "Не атрымана: 3."):
+            self.assertIn(line, out)
+        self.assertFalse((build.CACHE / "osm" / "h.json").exists())
+        self.assertFalse((build.CACHE / "routes.json").exists())
+        self.assertFalse(geo.GEOCODE_CACHE.exists())
+        index, out = self.build()
+        self.assertEqual((index["h"]["hints"], index["h"]["drive"]), ([], None))
+
+        # перарваны запыт Overpass адказвае 200 з няпоўным вынікам — ён не захоўваецца
+        _, out = self.fetch(osm={"elements": [SPRING], "remark": "runtime error: Query timed out"}, route=NO_ROUTE, names=None)
+        self.assertIn("OpenStreetMap не адказаў (паходаў: 1) — runtime error: Query timed out", out)
+        self.assertFalse((build.CACHE / "osm" / "h.json").exists())
+        self.assertEqual(common.read_json(geo.GEOCODE_CACHE), {"names:41.000,42.000": {"be": "", "en": ""}},
+                         "населенага пункта побач няма — гэта таксама адказ, ён не перапытваецца")
+
+        # паўтор пасля занятага сервера ўдаецца
+        answers = iter([busy, {"elements": [SPRING, VIEW]}])
+        _, out = self.fetch(osm=lambda query: next(answers))
+        self.assertEqual(self.kinds(), ["route", "osm", "osm"], "назва месца ўжо ёсць")
+        self.assertNotIn("Не атрымана", out)
+        index, out = self.build()
+        self.assertEqual((len(index["h"]["hints"]), index["h"]["drive"]["to"]["km"]), (2, 42.1))
+        self.assertNotIn("place", index["h"]["facts"]["start"], "пустая назва не паказваецца")
+
+        # збой пры --refresh не сцірае спампаванае
+        def offline(*args):
+            raise fetch.requests.ConnectionError("няма сеткі")
+        _, out = self.fetch(["--refresh"], weather=offline, osm=offline, route=offline)
+        self.assertIn("дарога на машыне не разлічана — няма сеткі", out)
+        self.assertEqual(len(common.read_json(build.CACHE / "osm" / "h.json")["items"]), 2)
+        self.assertEqual(self.build()[0]["h"]["drive"]["to"], {"km": 42.1, "minutes": 63})
+
+        # няправільныя лічбы сэрвісу маршрутаў не трапляюць на сайт
+        (build.CACHE / "routes.json").unlink()
+        for bad in ({"code": "Ok", "routes": [{"distance": 0, "duration": 0}]}, {"code": "Ok", "routes": [{"distance": "nan", "duration": 10}]},
+                    {"code": "Ok", "routes": [{}]}, FakeResponse({}, 500)):
+            self.fetch(route=bad)
+            self.assertFalse((build.CACHE / "routes.json").exists(), bad)
+
+    def test_place_names_are_settlements_in_two_languages(self):
+        answers = {"be,en": {"hamlet": " Хутар ", "municipality": "Раён"}, "en": {"county": "County", "municipality": "District"}}
+        with unittest.mock.patch.object(geo, "_nominatim", lambda lat, lng, lang, zoom=5: answers[lang]):
+            self.assertEqual(geo.place_names(41.0004, 42.0), {"be": "Хутар", "en": "Хутар"}, "без перакладу — тая ж назва")
+            answers["be,en"] = {"municipality": "Раён"}
+            self.assertEqual(geo.place_names(41.0004, 42.0), {"be": "Хутар", "en": "Хутар"}, "з кэша, без новага запыту")
+            self.assertEqual(geo.place_names(41.5, 42.0), {"be": "", "en": ""}, "муніцыпалітэт — не населены пункт")
+        self.assertEqual(sorted(common.read_json(geo.GEOCODE_CACHE)), ["names:41.000,42.000", "names:41.500,42.000"])
+
+    def test_without_home_there_is_no_drive(self):
+        self.hike()
+        for home in (None, {"name": "Дом"}, {"point": "Батумі"}, {"point": [91, 0]}, {"point": [float("nan"), 41]}):
+            self.cfg = {**CFG, "photos_root": str(self.photos_root), "home": home}
+            self.fetch(osm=[SPRING])
+            self.assertNotIn("route", self.kinds(), home)
+            index, out = self.build()
+            self.assertIsNone(index["h"]["drive"], home)
+            self.assertNotIn("запусціце `hike fetch`", out, "дарога без home не чакаецца")
+
+    def test_hints_are_limited_and_tied_to_the_track(self):
+        self.hike()
+        days = practical.raw_days([1], 4)
+        item = lambda i, north, east, kind="water": {"kind": kind, "type": "spring" if kind == "water" else "viewpoint",  # noqa: E731
+                                                     "lat": 41.0 + north * M, "lng": 42.0 + east * M / 0.7547,
+                                                     "name": {"be": "", "en": ""}, "osm": f"node/{i}"}
+        many = [item(i, 100 * (10 - i), 0) for i in range(11)]  # праз кожныя 100 м першага кіламетра, у адваротным парадку
+        self.assertEqual([q["pos"]["km"] for q in practical.osm_hints(many, days, None)], [i / 10 for i in range(11)])
+        with unittest.mock.patch.object(practical, "OSM_MAX", 4):
+            self.assertEqual([q["osm"] for q in practical.osm_hints(many, days, None)], ["node/10", "node/9", "node/8", "node/7"])
+        # некалькі аднолькавых аб'ектаў на адной пляцоўцы — адна падказка, з назвай — важнейшая
+        tables = [item(1, 500, 0, "place"), {**item(2, 520, 0, "place"), "name": {"be": "Пляцоўка", "en": "Site"}},
+                  item(3, 540, 0, "place"), item(4, 530, 0), item(5, 700, 0, "place")]
+        self.assertEqual([(q["osm"], q["kind"]) for q in practical.osm_hints(tables, days, None)],
+                         [("node/2", "place"), ("node/4", "water"), ("node/5", "place")])
+        near = lambda east, kind: len(practical.osm_hints([item(1, 500, east, kind)], days, None))  # noqa: E731
+        self.assertEqual([near(-240, "water"), near(-260, "water"), near(-140, "place"), near(-160, "place")], [1, 0, 1, 0],
+                         "вада — да 250 м ад трэку, іншыя месцы — да 150 м")
+        self.assertEqual(practical.osm_hints(many, [], None), [])
+        self.assertEqual(practical.osm_hints([], days, None), [])
+        self.assertIsNone(practical.osm_bbox([]))
+
+
+class TestReview160(FetchProject):
+    """Рэгрэсіі па review_2026-10-11_v1.6.0.md."""
+
+    def kinds(self):
+        return [kind for kind, _ in self.calls]
+
+    def two_days(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path(*SQUARE))
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1, 2]\n", encoding="utf-8")
+
+    def test_fetch_keeps_weather_of_days_whose_tour_is_missing(self):  # №1
+        self.two_days()
+        self.fetch()
+        weather = lambda: common.read_json(build.CACHE / "weather" / "h.json")["days"]  # noqa: E731
+        both = weather()
+        self.assertEqual(sorted(both), ["2025-06-01", "2025-06-02"])
+        published = [d["weather"] for d in self.build()[0]["h"]["days"]]
+
+        tour = build.CACHE / "komoot" / "tours" / "2.json"
+        saved = tour.read_text(encoding="utf-8")
+        tour.unlink()
+        self.fetch()
+        self.assertEqual(weather(), both, "дзень, тура якога няма ў кэшы, застаецца")
+        self.fetch(["--refresh"])
+        self.assertEqual(self.kinds().count("weather"), 1, "перапытваецца толькі дзень, які ёсць у трэку")
+        self.assertEqual(weather(), both)
+
+        # тур без каардынат (няпоўны адказ Komoot) — тое самае
+        common.write_json(tour, {**json.loads(saved), "coords": []})
+        self.fetch()
+        self.assertEqual(weather(), both)
+        # паход увогуле без даступных тураў
+        (build.CACHE / "komoot" / "tours" / "1.json").rename(build.CACHE / "komoot" / "tours" / "1.bak")
+        self.fetch()
+        self.assertEqual(weather(), both)
+        (build.CACHE / "komoot" / "tours" / "1.bak").rename(build.CACHE / "komoot" / "tours" / "1.json")
+
+        tour.write_text(saved, encoding="utf-8")
+        index, out = self.build()
+        self.assertEqual([d["weather"] for d in index["h"]["days"]], published, "пасля вяртання тура надвор'е на месцы")
+        self.assertNotIn("надвор'я няма", out)
+
+    def test_drive_back_is_routed_from_the_finish(self):  # №2
+        line = path((0, 0), (3000, 0))
+        self.add_tour(1, "2025-06-01T04:00:00Z", line)
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+        home = "41.59822,41.62692"
+        there = {"code": "Ok", "routes": [{"distance": 10000.0, "duration": 600.0}], "waypoints": [{"distance": 5.0}, {"distance": 40.0}]}
+        back = {"code": "Ok", "routes": [{"distance": 20000.0, "duration": 1200.0}], "waypoints": [{"distance": 900.0}, {"distance": 5.0}]}
+        # у кэшы ўжо ёсць дарога дом → фініш (так яе лічыла версія 1.6.0): для звароту яна не падыходзіць
+        old_key = "41.6269,41.5982>41.027,42.000"
+        common.write_json(build.CACHE / "routes.json", {"routes": {old_key: {"km": 1.0, "minutes": 1}}})
+        index, out = self.build()
+        self.assertIsNone(index["h"]["drive"])
+
+        self.fetch(route=lambda url: there if url.startswith(f"{fetch.API_ROUTE}{home};") else back)
+        self.assertEqual([c for kind, c in self.calls if kind == "route"],
+                         [f"{home};42.0,41.0", f"42.0,{line[-1][0]};{home}"], "другі запыт — ад фінішу дадому")
+        routes = common.read_json(build.CACHE / "routes.json")["routes"]
+        self.assertEqual(routes, {old_key: {"km": 1.0, "minutes": 1}, "41.6269,41.5982>41.000,42.000": {"km": 10.0, "minutes": 10},
+                                  "41.027,42.000>41.6269,41.5982": {"km": 20.0, "minutes": 20, "off": 900}})
+        index, out = self.build()
+        self.assertEqual(index["h"]["drive"]["to"], {"km": 10.0, "minutes": 10})
+        self.assertEqual(index["h"]["drive"]["back"], {"km": 20.0, "minutes": 20, "off": 900},
+                         "лічбы і адхіленне ад дарогі — для напрамку ад фінішу")
+        self.assertNotIn("запусціце `hike fetch`", out)
+        self.fetch()
+        self.assertNotIn("route", self.kinds(), "абодва напрамкі ўжо ў кэшы")
+
+        # дарогі ад фінішу яшчэ няма: зборка кажа запусціць fetch, а не паказвае дарогу ў другі бок
+        del routes["41.027,42.000>41.6269,41.5982"]
+        common.write_json(build.CACHE / "routes.json", {"routes": routes})
+        index, out = self.build()
+        self.assertNotIn("back", index["h"]["drive"])
+        self.assertIn("падказак OpenStreetMap або дарогі на машыне няма для паходаў: 1", out)
+
+    def test_missing_hour_makes_weather_incomplete(self):  # №3
+        self.hike()  # 04:00–08:00 UTC; пункты — на 04:00, 06:00 і 08:00
+
+        def answer(hole):
+            def weather(params):
+                places = hourly_answer(params)
+                for place in places:
+                    hours = [datetime.fromtimestamp(t, timezone.utc).hour for t in place["hourly"]["time"]]
+                    place["hourly"]["precipitation"] = [None if h == hole else 0.0 for h in hours]
+                    place["hourly"]["weather_code"] = [2] * len(hours)
+                return places
+            return weather
+
+        cached = lambda: common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]  # noqa: E731
+        _, out = self.fetch(weather=answer(5))
+        self.assertIn("няпоўныя звесткі", out)
+        self.assertEqual((cached()["complete"], "precip" in cached()["span"]), (False, False),
+                         "сума з прапушчанай гадзінай — не «без ападкаў»")
+        self.assertEqual([q["precip"] for q in cached()["points"]], [0.0, 0.0, 0.0], "самі пункты вядомыя")
+        self.assertEqual(cached()["span"]["tempMax"], -2.0, "астатнія паказчыкі застаюцца")
+        self.assertNotIn("precip", self.build()[0]["h"]["days"][0]["weather"]["span"])
+        self.assertEqual(self.fetch(weather=answer(5))[0][0][0], fetch.API_WEATHER, "няпоўны адказ пытаецца зноў")
+
+        self.fetch(weather=answer(None))
+        self.assertEqual((cached()["complete"], cached()["span"]["precip"]), (True, 0.0), "поўны сухі адказ")
+        self.assertEqual(self.fetch(weather=answer(None))[0], [])
+        # прапушчаная гадзіна па-за часам паходу нічога не псуе
+        self.fetch(["--refresh"], weather=answer(12))
+        self.assertEqual((cached()["complete"], cached()["span"]["precip"]), (True, 0.0))
+
+        # надвор'е, падлічанае па ранейшых правілах, да трэку ўжо не адносіцца і пытаецца зноў
+        points = practical.weather_points(practical.raw_days([1], 4)[0])
+        old_key = hashlib.sha1(json.dumps(points, sort_keys=True).encode()).hexdigest()[:12]
+        self.assertNotEqual(practical.weather_key(points), old_key)
+        common.write_json(build.CACHE / "weather" / "h.json", {"days": {"2025-06-01": {**cached(), "key": old_key}}})
+        self.assertIn("надвор'я няма для паходаў: 1", self.build()[1])
+        self.assertEqual(len(self.fetch()[0]), 1)
+
+    def test_removed_track_drops_hints_and_drive(self):  # №4
+        self.hike()
+        self.fetch(osm=[SPRING])
+        before = self.build()[0]["h"]
+        self.assertEqual((len(before["hints"]), before["drive"]["to"]["km"]), (1, 42.1))
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: []\nlocation: [40, 43]\n", encoding="utf-8")
+        for attempt in (1, 2):  # дзве зборкі запар: старое не вяртаецца з папярэдняга індэкса
+            index, out = self.build()
+            h = index["h"]
+            self.assertEqual((h["track"], h["days"], h["point"], h["facts"]), (None, [], [43.0, 40.0], None), attempt)
+            self.assertEqual((h["hints"], h["drive"]), ([], None), "без трэку няма ні падказак, ні дарогі да яго")
+            self.assertNotIn("запусціце `hike fetch`", out)
+
+    def test_non_potable_water_is_never_a_hint(self):  # №5
+        item = lambda **tags: practical.osm_item({"type": "node", "id": 7, "lat": 41.0, "lon": 42.0, "tags": tags})  # noqa: E731
+        for tags in ({"amenity": "water_point"}, {"amenity": "drinking_water"}, {"natural": "spring"}, {"man_made": "water_well"}):
+            self.assertIsNone(item(**tags, drinking_water="no"), tags)
+            self.assertEqual(item(**tags, drinking_water="yes")["kind"], "water", tags)
+            self.assertEqual(item(**tags)["kind"], "water", tags)
+        self.assertEqual(item(amenity="shelter", drinking_water="no")["type"], "shelter", "навес без вады — усё роўна навес")
+
+        self.hike()
+        bad = osm_node(99, 500, -100, amenity="water_point", drinking_water="no")
+        self.fetch(osm=[bad])
+        self.assertEqual(self.build()[0]["h"]["hints"], [])
+
+        # кэш, сабраны па ранейшых правілах адбору, не выкарыстоўваецца і пытаецца зноў
+        bbox = practical.osm_bbox(practical.raw_days([1], 4))
+        old_key = hashlib.sha1(json.dumps([bbox, practical.OSM_QUERY]).encode()).hexdigest()[:12]
+        self.assertNotEqual(practical.osm_key(bbox), old_key)
+        common.write_json(build.CACHE / "osm" / "h.json", {"key": old_key, "items": [
+            {"kind": "water", "type": "tap", "lat": bad["lat"], "lng": bad["lon"], "name": {"be": "", "en": ""}, "osm": "node/99"}]})
+        index, out = self.build()
+        self.assertEqual(index["h"]["hints"], [])
+        self.assertIn("падказак OpenStreetMap або дарогі на машыне няма для паходаў: 1", out)
+        self.fetch(osm=[bad, SPRING])
+        self.assertEqual(self.kinds(), ["osm"])
+        self.assertEqual([q["osm"] for q in self.build()[0]["h"]["hints"]], ["node/1"])
+
+
+class TestReview161(FetchProject):
+    """Рэгрэсіі па review_2026-10-11_v1.6.1.md."""
+
+    def flat_tour(self, tid, iso, points, alt):
+        """Тур на пастаяннай вышыні: хвіліна на кожны пункт."""
+        self.add_tour(tid, iso, points, coords=[[lat, lng, alt, i * 60000] for i, (lat, lng) in enumerate(points)])
+
+    def test_removed_track_drops_positions_of_authors_records(self):  # №1
+        block = "practical:\n  places:\n    - {type: shelter, km: 1}\n  water:\n    sources:\n      - {type: spring, time: \"09:00\"}\n"
+        self.hike(block)
+        placed = lambda index: (index["h"]["practical"]["places"][0]["pos"], index["h"]["practical"]["water"]["sources"][0]["pos"])  # noqa: E731
+        before = self.build()[0]
+        self.assertEqual([q["km"] for q in placed(before)], [1.0, 1.0])
+
+        # тура няма ў кэшы: трэк застаецца ранейшы, і месцы запісаў разам з ім
+        tour = build.CACHE / "komoot" / "tours" / "1.json"
+        saved = tour.read_text(encoding="utf-8")
+        tour.unlink()
+        self.assertEqual(placed(self.build()[0]), placed(before))
+        tour.write_text(saved, encoding="utf-8")
+
+        # трэк прыбраны з паходу: запісы застаюцца, але без месца на трэку, якога больш няма
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: []\nlocation: [40, 43]\n" + block, encoding="utf-8")
+        for attempt in (1, 2):
+            index, out = self.build()
+            self.assertEqual((index["h"]["track"], index["h"]["point"]), (None, [43.0, 40.0]), attempt)
+            self.assertEqual(placed(index), (None, None), "месца на выдаленым трэку не вяртаецца з папярэдняга індэкса")
+            self.assertEqual(index["h"]["practical"]["places"][0]["type"], "shelter", "сам запіс застаецца")
+            self.assertEqual(out.count("месца не вызначана — няма трэку"), 2)
+
+    def test_place_on_a_sparse_track_is_projected_onto_the_segment(self):  # №3
+        side = lambda east: {"kind": "water", "type": "spring", "lat": 41.0 + 500 * M, "lng": 42.0 + east * M / 0.7547,  # noqa: E731
+                             "name": {"be": "", "en": ""}, "osm": f"node/{east}"}
+        found = {}
+        for name, step in (("sparse", 1000.0), ("dense", 20.0)):
+            line = path((0, 0), (1000, 0), step=step)
+            n = len(line) - 1  # роўны пад'ём з 1000 да 1400 м за 4 гадзіны — аднолькавы для абодвух запісаў
+            self.add_tour(1, "2025-06-01T04:00:00Z", line,
+                          coords=[[lat, lng, 1000 + 400 * i / n, i / n * 14400000] for i, (lat, lng) in enumerate(line)])
+            days = practical.raw_days([1], 4)
+            self.assertEqual(len(practical._points(days[0])), 2 if name == "sparse" else 51)
+            pos, problem = practical.locate({"at": [41.0 + 500 * M, 42.0]}, days, {})
+            self.assertIsNone(problem)
+            found[name] = (pos["km"], pos.get("off"), pos["alt"], pos["time"],
+                           [q["osm"] for q in practical.osm_hints([side(0), side(-240), side(-260)], days, None)])
+        self.assertEqual(found["sparse"], (0.5, None, 1200, "10:00", ["node/-240", "node/0"]),
+                         "месца на сцежцы паміж двума пунктамі: кіламетр, вышыня і час — па прамой")
+        self.assertEqual(found["sparse"], found["dense"], "адбор не залежыць ад таго, наколькі часта запісаны пункты")
+        off = practical.locate({"at": [41.0 + 500 * M, 42.0 - 240 * M / 0.7547]}, days, {})[0]["off"]
+        self.assertAlmostEqual(off, 240, delta=2)
+
+        # разрыў паміж турамі дня — не адрэзак маршруту
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (1000, 0), step=1000.0), duration=3600)
+        self.add_tour(2, "2025-06-01T08:00:00Z", path((1000, 2000), (2000, 2000), step=1000.0))
+        days = practical.raw_days([1, 2], 4)
+        self.assertEqual(len(days[0]["segs"]), 2)
+        gap = {**side(1000), "lat": 41.0 + 1000 * M}  # пасярэдзіне паміж фінішам першага тура і стартам другога
+        self.assertEqual(practical.osm_hints([gap], days, None), [])
+        pos = practical.locate({"at": [gap["lat"], gap["lng"]]}, days, {})[0]
+        self.assertAlmostEqual(pos["off"], 1000, delta=5)
+        self.assertEqual(practical._project(41.0, 42.0, []), None)
+
+    def test_steepest_grade_does_not_span_separate_tours(self):  # №4
+        self.flat_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (500, 0)), 1000)
+        self.flat_tour(2, "2025-06-01T12:00:00Z", path((30000, 0), (30500, 0)), 2000)  # пасля пераезду, на 1000 м вышэй
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1, 2]\n", encoding="utf-8")
+        h = self.build()[0]["h"]
+        self.assertEqual(len(h["days"]), 1)
+        for facts in (h["facts"], h["days"][0]["facts"]):
+            self.assertNotIn("steepUp", facts, "розніца вышынь паміж турамі — не пад'ём")
+            self.assertNotIn("steepDown", facts)
+        # ухіл унутры аднаго тура па-ранейшаму знаходзіцца, і кіламетр пачатку лічыцца ад пачатку дня
+        climb = path((30000, 0), (31000, 0))
+        self.add_tour(2, "2025-06-01T12:00:00Z", climb,  # першыя 500 м — пад'ём 10 %, далей роўна
+                      coords=[[lat, lng, 2000 + 2 * min(i, 25), i * 60000] for i, (lat, lng) in enumerate(climb)])
+        facts = self.build()[0]["h"]["facts"]
+        self.assertEqual((facts["steepUp"], "steepDown" in facts), ({"grade": 10, "km": 0.5}, False))
+
+    def test_absent_hour_makes_weather_incomplete(self):  # працяг №3 з review 1.6.0
+        self.hike()  # 04:00–08:00 UTC; пункты — на 04:00, 06:00 і 08:00
+
+        def without(hour):
+            def weather(params):
+                places = hourly_answer(params)
+                for place in places:
+                    hourly = place["hourly"]
+                    keep = [i for i, t in enumerate(hourly["time"]) if datetime.fromtimestamp(t, timezone.utc).hour != hour]
+                    for name in hourly:
+                        hourly[name] = [hourly[name][i] for i in keep]
+                    hourly["precipitation"] = [0.0] * len(keep)
+                return places
+            return weather
+
+        cached = lambda: common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]  # noqa: E731
+        _, out = self.fetch(weather=without(5))  # гадзіны 05:00 у адказе няма зусім
+        self.assertIn("няпоўныя звесткі", out)
+        self.assertEqual((cached()["complete"], "precip" in cached()["span"], "snow" in cached()["span"]), (False, False, False))
+        self.assertEqual([q["temp"] for q in cached()["points"]], [-6.0, -8.0, -2.0], "паказчыкі ў пунктах ёсць")
+        self.assertEqual(len(self.fetch(weather=without(5))[0]), 1, "няпоўны адказ пытаецца зноў")
+
+        # няма гадзіны самога пункта: паказчык суседняй гадзіны за яго не выдаецца
+        self.fetch(weather=without(6))
+        self.assertEqual([q["temp"] for q in cached()["points"]], [-6.0, None, -2.0])
+        self.assertFalse(cached()["complete"])
+
+        self.fetch(weather=without(12))  # гадзіна па-за часам паходу не патрэбная
+        self.assertEqual((cached()["complete"], cached()["span"]["precip"]), (True, 0.0))
+        self.assertEqual(self.fetch(weather=without(12))[0], [])
+
+
+class TestReview162(FetchProject):
+    """Рэгрэсіі па review_2026-10-11_v1.6.2.md."""
+
+    def rising_tour(self, tid, iso, points, low=1000, high=1400, minutes=240):
+        """Тур з роўным пад'ёмам і роўным ходам — аднолькавы для любой шчыльнасці пунктаў."""
+        n = len(points) - 1
+        self.add_tour(tid, iso, points, coords=[[lat, lng, low + (high - low) * i / n, i / n * minutes * 60000]
+                                                for i, (lat, lng) in enumerate(points)])
+
+    def test_km_is_placed_on_the_track_not_on_the_nearest_recorded_point(self):  # №1
+        block = "practical:\n  places:\n    - {type: shelter, km: 0.4}\n    - {type: table, km: 1.2}\n    - {type: camp, km: 1.5}\n" \
+                "  water:\n    sources:\n      - {type: spring, km: 0.3}\n"
+        found = {}
+        for name, step in (("sparse", 1000.0), ("dense", 20.0)):
+            self.rising_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (1000, 0), step=step))
+            (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n" + block, encoding="utf-8")
+            index, out = self.build()
+            p = index["h"]["practical"]
+            spring, (shelter, table, camp) = p["water"]["sources"][0]["pos"], [q["pos"] for q in p["places"]]
+            for pos, metres in ((spring, 300), (shelter, 400)):
+                self.assertAlmostEqual(pos["at"][1], 41.0 + metres * M, delta=3e-5, msg=name)  # да 3 м
+                self.assertEqual(pos["at"][0], 42.0, name)
+            found[name] = [(q["km"], q["alt"], q["time"]) for q in (spring, shelter, table)]
+            self.assertIsNone(camp, name)
+            self.assertIn("кіламетр km: 1.5 па-за трэкам дня 1 (0–1.0 км)", out)
+        self.assertEqual(found["sparse"], [(0.3, 1120, "09:12"), (0.4, 1160, "09:36"), (1.0, 1400, "12:00")],
+                         "зададзены кіламетр, вышыня і час — па прамой; кіламетр адразу за фінішам — фініш")
+        self.assertEqual(found["sparse"], found["dense"], "вынік не залежыць ад шчыльнасці запісу")
+
+        # мяжа тураў дня: кіламетр у іх агульны, а вышыня — свайго тура
+        self.rising_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (1000, 0), step=1000.0), 1000, 1000, 60)
+        self.rising_tour(2, "2025-06-01T12:00:00Z", path((30000, 0), (31000, 0), step=1000.0), 2000, 2000, 60)
+        day = practical.raw_days([1, 2], 4)[0]
+        edge = day["segs"][0][-1][4]
+        self.assertEqual(day["segs"][1][0][4], edge)
+        self.assertEqual([practical._at_km(day, km)[2] for km in (edge / 2, edge, edge * 1.5, edge * 2)], [1000, 1000, 2000, 2000])
+
+    def test_route_type_ignores_the_transfer_between_tours(self):  # №2
+        def day_type(*tours):
+            for tid, line in enumerate(tours, 1):
+                self.add_tour(tid, f"2025-06-01T{4 * tid:02d}:00:00Z", line, duration=3600)
+            ids = list(range(1, len(tours) + 1))
+            (self.content / "h.yaml").write_text(f"date: 2025-06-01\ntitle: {{be: H}}\nkomoot: {ids}\n", encoding="utf-8")
+            h = self.build()[0]["h"]
+            self.assertEqual((len(h["days"]), h["facts"]["type"]), (1, h["days"][0]["facts"]["type"]))
+            return h["facts"]["type"]
+
+        there_and_back = lambda north: path((north, 0), (north + 1000, 0), (north, 0))  # noqa: E731
+        self.assertEqual(day_type(there_and_back(0), there_and_back(30000)), "out_and_back",
+                         "дзве вылазкі туды і назад пасля пераезду — не шлях з пункта А ў пункт Б")
+        self.assertEqual(day_type(there_and_back(0), path(*[(n + 30000, e) for n, e in SQUARE])), "mixed", "вылазкі розных тыпаў")
+        self.assertEqual(day_type(path((0, 0), (1000, 0)), path((1000, 0), (0, 0))), "out_and_back",
+                         "перапынак у запісе без пераезду: гэта адзін маршрут")
+        self.assertEqual(day_type(path((0, 0), (1000, 0)), path((1300, 0), (2300, 0))), "point_to_point",
+                         "працяг за 300 м ад папярэдняга фінішу — той жа маршрут")
+
+        # тое ж для дзён паходу: начлег на месцы злучае дні, пераезд — раздзяляе
+        days = lambda *lines: [{"segs": [[(lat, lng, None, None, 0.0) for lat, lng in line]]} for line in lines]  # noqa: E731
+        hike_type = lambda *lines: practical.hike_route_type(days(*lines), [practical.route_type(line) for line in lines])  # noqa: E731
+        self.assertEqual(hike_type(path((0, 0), (3000, 0)), path((3000, 0), (0, 0))), "out_and_back")
+        self.assertEqual(hike_type(there_and_back(0), there_and_back(30000)), "out_and_back")
+        self.assertEqual(hike_type(there_and_back(0), path(*[(n + 30000, e) for n, e in SQUARE])), "mixed")
+        self.assertIsNone(practical.parts_route_type([[], [(41.0, 42.0)]]))
+
+    def test_route_type_does_not_depend_on_point_density(self):  # №3
+        shapes = {
+            "out_and_back": [(0, 0), (1000, 0), (0, 0)],
+            "loop": SQUARE,
+            "mixed": [(0, 0), (1500, 0), (2000, 0), (2000, 500), (1500, 500), (1500, 0), (0, 0)],  # ножка 1,5 км + кола 2 км
+            "point_to_point": [(0, 0), (1500, 0), (1500, 1500)],
+        }
+
+        def uneven(corners):  # частка адрэзкаў запісана часта, частка — толькі канцамі
+            line = []
+            for i, (a, b) in enumerate(zip(corners, corners[1:])):
+                line += path(a, b, step=(20.0, 5000.0, 170.0)[i % 3])[:-1]
+            return line + path(corners[-1], corners[-1])[-1:]
+
+        for name, corners in shapes.items():
+            variants = {"dense": path(*corners), "sparse": path(*corners, step=5000.0), "uneven": uneven(corners)}
+            self.assertEqual(len(variants["sparse"]), len(corners), "толькі вуглы")
+            self.assertEqual({density: practical.route_type(line) for density, line in variants.items()},
+                             dict.fromkeys(variants, name), name)
+            shares = [practical.overlap_share(line) for line in variants.values()]
+            self.assertLess(max(shares) - min(shares), 0.03, f"{name}: доля паўторнага шляху {shares}")
+        # выбарка — роўна праз 30 м шляху з канцавым пунктам, незалежна ад запісаных пунктаў
+        for line in (path((0, 0), (1000, 0)), path((0, 0), (1000, 0), step=1000.0)):
+            samples, length = practical._resample(line)
+            self.assertEqual(len(samples), 35)
+            self.assertAlmostEqual(samples[1][2], 30.0, places=6)
+            self.assertAlmostEqual(samples[-1][2], length, places=6)
+            self.assertEqual(samples[-1][:2], line[-1])
+
+    def test_weather_request_covers_the_hours_around_midnight_utc(self):  # №4
+        for start, finish_hour in (("2025-06-01T19:30:00Z", "23:30"), ("2025-06-01T19:50:00Z", "23:50"), ("2025-06-01T20:10:00Z", "00:10")):
+            self.add_tour(1, start, path(*SQUARE))  # чатыры гадзіны: фініш каля поўначы UTC
+            (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+            calls, out = self.fetch()
+            self.assertEqual([(c[1]["start_date"], c[1]["end_date"]) for c in calls], [("2025-06-01", "2025-06-02")], finish_hour)
+            self.assertNotIn("няпоўныя звесткі", out, finish_hour)
+            day = common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]
+            self.assertTrue(day["complete"], finish_hour)
+            self.assertEqual((day["points"][-1]["temp"] is None, "precip" in day["span"]), (False, True), finish_hour)
+            self.assertEqual(self.fetch()[0], [], f"фініш у {finish_hour} UTC: поўны адказ не пытаецца зноў")
+            self.assertIn("weather", self.build()[0]["h"]["days"][0])
+        # старт адразу пасля поўначы UTC папярэдняй даты не патрабуе
+        self.add_tour(1, "2025-06-02T00:10:00Z", path(*SQUARE))
+        calls, _ = self.fetch()
+        self.assertEqual([(c[1]["start_date"], c[1]["end_date"]) for c in calls], [("2025-06-02", "2025-06-02")])
+        points = practical.weather_points(practical.raw_days([1], 4)[0])
+        hours = practical.weather_hours(points)
+        self.assertEqual((hours[0] % 3600, hours[0] <= points[0]["ts"] + 1800, hours[-1] >= points[-1]["ts"] - 1800), (0, True, True))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ const dom = new JSDOM("<!doctype html><body></body>");
 globalThis.document = dom.window.document;
 globalThis.Node = dom.window.Node;
 const { renderPractical } = await import(new URL("../../docs/assets/practical.js", import.meta.url));
+const { hikePois } = await import(new URL("../../docs/assets/pois.js", import.meta.url));
 
 const end = (time, alt = 500) => ({ at: [42, 41], alt, time });
 const hike = (extra) => ({ days: [{}], photos: [], facts: null, practical: null, ...extra });
@@ -111,6 +112,11 @@ test("надвор'е: па пунктах для дня, радок на дзе
   assert.deepEqual(second.lines, ["Старт · 08:00 · 500 м", "+15 °C · пахмурна · вецер 7 км/г, парывы 18 · воблачнасць 100 %",
     "За час паходу: +20 °C · без ападкаў · вецер да 3 км/г"]);
 
+  // сума ападкаў невядомая (у адказе сэрвісу была прапушчаная гадзіна) — пра ападкі нічога не сцвярджаецца (review v1.6.0, №3)
+  const unknown = { points: [point("start", "08:00", 500, {})], span: { tempMin: 20.2, tempMax: 20.4, snow: 0, wind: 3 } };
+  const [gap] = groupsOf(renderPractical(hike({ days: [{ date: "2026-09-13", weather: unknown }] }), null, () => {}));
+  assert.equal(gap.lines.at(-1), "За час паходу: +20 °C · вецер да 3 км/г");
+
   // без мадэлі — толькі назіранні аўтара; без таго і другога групы няма
   const [own] = groupsOf(renderPractical(hike({ practical: notes }), null, () => {}));
   assert.deepEqual([own.lines, own.sources], [["На хрыбце туман."], ["Мае назіранні"]]);
@@ -129,4 +135,38 @@ test("як дабрацца: цана ў лары і разлік у даляр�
   assert.deepEqual(priced.sources, ["Мае назіранні", "Даляры — разлік па курсе Нацбанка Грузіі на 10 кастрычніка 2026"]);
   const plain = view([way({ price: 80 })]);
   assert.deepEqual([plain.lines[1], plain.sources], ["80 ₾", ["Мае назіранні"]], "без курсу — толькі лары");
+});
+
+test("падказкі OpenStreetMap і дарога на машыне: без звестак аўтара, па днях", () => {
+  const hint = (day, kind, type, osm) => ({ kind, type, name: { be: "", en: "" }, osm, pos: { day, km: 1.5, at: [42 + day, 41], alt: 800 } });
+  const two = hike({
+    days: [{}, {}], hints: [hint(0, "water", "tap", "node/1"), hint(1, "place", "camp", "node/2")],
+    drive: { from: { be: "Батумі", en: "Batumi" }, to: { km: 8.26, minutes: 14 } },
+  });
+  const DRIVE = "Разлік сэрвісу маршрутаў OSRM па дарогах OpenStreetMap — без уліку затораў і стану дарогі";
+  const OSM = "З OpenStreetMap, мной не праверана";
+  const whole = groupsOf(renderPractical(two, null, () => {}));
+  assert.deepEqual(whole.map((g) => g.title), ["Як дабрацца8 км, каля 14 хв", "Падказкі з OpenStreetMap2"]);
+  assert.deepEqual([whole[0].lines, whole[0].sources], [["На машыне ад: Батумі", "да старту: 8,3 км, каля 14 хв"], [DRIVE]],
+    "без звестак аўтара подпісу «Мае назіранні» няма");
+  assert.deepEqual(whole[1].sources, [OSM]);
+  assert.deepEqual(whole[1].lines.filter((line) => line.includes("км ад старту")),
+    ["Дзень 1, 1,5 км ад старту · 800 м", "Дзень 2, 1,5 км ад старту · 800 м"]);
+
+  const second = groupsOf(renderPractical(two, 1, () => {}));
+  assert.equal(second[1].title, "Падказкі з OpenStreetMap1", "выбраны дзень — толькі яго падказкі");
+  assert.ok(second[1].lines.includes("Месца для начоўкі") && !second[1].lines.includes("Кран"));
+  assert.equal(groupsOf(renderPractical(hike({ days: [{}, {}], hints: [hint(0, "water", "tap", "node/1")] }), 1, () => {}) || []).length, 0,
+    "у дня без падказак групы няма");
+
+  // кропкі для карты і профілю: запісы без месца на трэку прапускаюцца, падказкі пазначаныя
+  const source = (pos) => ({ type: "spring", name: { be: "Халодная", en: "" }, note: { be: "", en: "" }, water: true, pos });
+  const full = { ...two, practical: { places: [], water: { sources: [source({ day: 0, km: 2, at: [42.5, 41.5], alt: 700, time: "10:00" }), source(null)] } } };
+  assert.deepEqual(hikePois(full, null).map((p) => [p.kind, p.hint, p.day, p.km, p.at, p.title, p.source]), [
+    ["water", false, 0, 2, [42.5, 41.5], "Крыніца: Халодная", "Мае назіранні"],
+    ["water", true, 0, 1.5, [42, 41], "Кран", OSM],
+    ["place", true, 1, 1.5, [43, 41], "Месца для начоўкі", OSM],
+  ]);
+  assert.deepEqual(hikePois(full, 1).map((p) => p.title), ["Месца для начоўкі"]);
+  assert.deepEqual(hikePois(hike({}), null), [], "паход без звестак і падказак — без кропак");
 });

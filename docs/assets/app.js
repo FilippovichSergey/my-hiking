@@ -4,6 +4,7 @@ import { gpxText } from "./gpx.js";
 import { renderPractical } from "./practical.js";
 import { dateRange, duration, lang, num, pick, setLang, shortDate, t } from "./i18n.js";
 import { createMap } from "./map.js";
+import { hikePois } from "./pois.js";
 import { renderProfile } from "./profile.js";
 
 const PSWP_URL = "https://cdn.jsdelivr.net/npm/photoswipe@5.4.4/dist/photoswipe.esm.min.js";
@@ -15,7 +16,7 @@ const MOUNTAIN_ICON = '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M2 2
 const body = document.getElementById("panel-body");
 const state = {
   hikes: [],
-  filters: { q: "", year: "", region: "", difficulty: "", distance: "", days: "", type: "" },
+  filters: { q: "", year: "", region: "", difficulty: "", distance: "", days: "", type: "", cond: "" },
   sort: "new",
   selected: null,
   day: null,
@@ -131,6 +132,11 @@ function dayCount(hk) {
   const span = Math.round((Date.parse(hk.end) - Date.parse(hk.date)) / 864e5) + 1;
   return span > 1 ? span : 1;
 }
+// Умовы — толькі паводле звестак аўтара: падказкі OpenStreetMap не правераныя і ў фільтр не ідуць.
+const CONDITIONS = {
+  water: (hk) => hk.practical?.water?.available === true || (hk.practical?.water?.sources || []).some((s) => s.water === true),
+  transit: (hk) => (hk.practical?.gettingThere || []).some((w) => ["marshrutka", "bus", "train"].includes(w.type)),
+};
 // Паходы без трэку (без лічбаў) пры сартаванні па нагрузцы ідуць у канец.
 const byStat = (key, dir) => (a, b) =>
   dir * ((a.stats?.[key] ?? dir * Infinity) - (b.stats?.[key] ?? dir * Infinity));
@@ -144,7 +150,7 @@ const SORTS = {
 };
 
 function filtered() {
-  const { q, year, region, difficulty, distance, days, type } = state.filters;
+  const { q, year, region, difficulty, distance, days, type, cond } = state.filters;
   const needle = q.trim().toLowerCase();
   const [minKm, maxKm] = DISTANCES[distance] || [];
   return state.hikes.filter((hk) =>
@@ -154,6 +160,7 @@ function filtered() {
     (!distance || (hk.stats != null && hk.stats.distance >= minKm && hk.stats.distance < maxKm)) &&
     (!days || DAY_COUNTS[days](dayCount(hk))) &&
     (!type || hk.facts?.type === type) &&
+    (!cond || CONDITIONS[cond](hk)) &&
     (!needle || [hk.title.be, hk.title.en, hk.region.be, hk.region.en].some((s) => s?.toLowerCase().includes(needle))));
 }
 
@@ -234,6 +241,8 @@ function renderList() {
   const regions = [...new Map(state.hikes.filter(regionKey).map((hk) => [regionKey(hk), pick(hk.region)]))]
     .sort((a, b) => a[1].localeCompare(b[1], lang));
   const setFilter = (key, value) => { state.filters[key] = value; renderList(); };
+  // Фільтр па ўмовах з'яўляецца, калі хоць у аднаго паходу аўтар запоўніў такія звесткі.
+  const conds = Object.keys(CONDITIONS).filter((key) => state.hikes.some(CONDITIONS[key]));
   const reset = Object.values(state.filters).some(Boolean)
     ? h("button", {
       type: "button", class: "reset",
@@ -280,7 +289,9 @@ function renderList() {
           (v) => setFilter("days", v), t("allDayCounts"))),
       h("div", { class: "filter-row" },
         select(Object.keys(t("routeShort")).map((k) => [k, t("routeShort")[k]]), state.filters.type, t("allRouteTypes"),
-          (v) => setFilter("type", v), t("allRouteTypes")))),
+          (v) => setFilter("type", v), t("allRouteTypes")),
+        conds.length ? select(conds.map((k) => [k, t("conditions")[k]]), state.filters.cond, t("allConditions"),
+          (v) => setFilter("cond", v), t("allConditions")) : null)),
     h("div", { class: "result-row" },
       h("p", { class: "result-count", "aria-live": "polite" }, t("found", list.length)),
       reset,
@@ -455,12 +466,18 @@ async function renderDetail(hike, fit = true) {
 
   map.select(hike, track, day, fit);
   map.setHikes(filtered().includes(hike) ? filtered() : [...filtered(), hike]);
+  // Крыніцы вады і месцы — на карце і на профілі вышыні; падказкі OpenStreetMap пазначаныя асобна.
+  const pois = hikePois(hike, day);
+  map.setPois?.(pois); // у кэшы браўзера яшчэ можа быць ранейшы map.js
 
   const profEl = document.getElementById("profile");
   if (profEl && track) {
     const days = track.days.map((d, i) => ({ segs: d.segs, color: colors[i] }));
     const shown = day != null ? (days[day] ? [days[day]] : []) : days;
-    profile = renderProfile(profEl, shown, (p) => map.setHoverPoint(p, p ? shown[p.day].color : null));
+    const marks = pois.map((p) => ({
+      day: day != null ? 0 : p.day, km: p.km, kind: p.kind, hint: p.hint, title: p.hint ? `${p.title} · ${t("osmMark")}` : p.title,
+    }));
+    profile = renderProfile(profEl, shown, (p) => map.setHoverPoint(p, p ? shown[p.day].color : null), marks);
   }
 }
 

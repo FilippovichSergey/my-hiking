@@ -1,9 +1,11 @@
 // Блок «Практычная інфармацыя» на старонцы паходу.
 // facts — разлік па трэку (тып маршруту, старт і фініш, светлавы дзень, тэмп, рэльеф);
-// days[].weather — надвор'е паводле мадэлі Open-Meteo; practical — звесткі аўтара з файла паходу.
+// days[].weather — надвор'е паводле мадэлі Open-Meteo; practical — звесткі аўтара з файла паходу;
+// drive — дарога на машыне паводле сэрвісу маршрутаў; hints — месцы з OpenStreetMap каля трэку.
 // Пад кожнай часткай падпісана, адкуль даныя.
 import { h } from "./dom.js";
 import { dateRange, duration, num, pick, shortDate, t } from "./i18n.js";
+import { poiIcon, poiTitle, poiWhere } from "./pois.js";
 
 const join = (parts, sep = " · ") => parts.filter(Boolean).join(sep);
 const has = (pair) => Boolean(pair && (pair.be || pair.en));
@@ -26,7 +28,7 @@ function factsBlock(facts, whole) {
     rows.push(row(t("routeType"), t("routeTypes")[facts.type],
       facts.typeBy === "author" ? h("span", { class: "p-muted" }, ` · ${t("byAuthor")}`) : null));
   }
-  const end = (e) => join([!whole && e.time, e.alt != null && `${num(e.alt)} ${t("m")}`]);
+  const end = (e) => join([has(e.place) && pick(e.place), !whole && e.time, e.alt != null && `${num(e.alt)} ${t("m")}`]);
   if (facts.start) {
     const [lng, lat] = facts.start.at;
     rows.push(row(t("start"), end(facts.start), " ", h("a", {
@@ -47,29 +49,40 @@ function factsBlock(facts, whole) {
   const relief = join([facts.gain != null && t("gainPerKm", num(facts.gain)), steep(facts.steepUp, "steepUp"),
     steep(facts.steepDown, "steepDown")]);
   if (relief) rows.push(row(t("relief"), relief));
-  return rows.length ? [h("dl", { class: "p-facts" }, rows), source("srcTrack")] : [];
+  const placed = has(facts.start?.place) || has(facts.finish?.place);
+  return rows.length ? [h("dl", { class: "p-facts" }, rows), source(placed ? "srcTrackPlaces" : "srcTrack")] : [];
 }
 
-/** Запіс з месцам на трэку (крыніца вады або асаблівае месца). */
-function placedItem(item, title, flags, hike, openPhoto) {
-  const pos = item.pos;
-  const where = pos ? join([
-    `${hike.days.length > 1 ? `${t("day", pos.day + 1)}, ` : ""}${t("kmFromStart", num(pos.km, 1))}`,
-    pos.alt != null && `${num(pos.alt)} ${t("m")}`, pos.time, pos.off ? t("offTrack", num(pos.off)) : null]) : null;
+/** Запіс з месцам на трэку (крыніца вады, асаблівае месца або падказка OpenStreetMap) — з тым жа значком, што на карце. */
+function placedItem(kind, item, flags, hike, openPhoto) {
   const photo = item.photo != null ? hike.photos[item.photo] : null;
   return h("li", { class: "p-item" },
     photo ? h("button", { type: "button", class: "p-photo", "aria-label": t("openPhoto"), onclick: () => openPhoto(item.photo) },
-      h("img", { src: photo.thumb, alt: "", loading: "lazy", width: 48, height: 48 })) : null,
+      h("img", { src: photo.thumb, alt: "", loading: "lazy", width: 48, height: 48 }))
+      : h("span", { class: `poi poi-${kind}${item.osm ? " poi-hint" : ""}` }, poiIcon(kind, item.type)),
     h("div", null,
-      h("div", { class: "p-title" }, title),
-      where ? h("div", { class: "p-meta" }, where) : null,
+      h("div", { class: "p-title" }, poiTitle(kind, item)),
+      item.pos ? h("div", { class: "p-meta" }, poiWhere(item.pos, hike)) : null,
       flags.length ? h("div", { class: "p-meta" }, join(flags)) : null,
       has(item.note) ? h("div", { class: "p-text" }, pick(item.note)) : null,
-      item.seen ? h("div", { class: "p-meta" }, t("seen", oneDate(item.seen))) : null));
+      item.seen ? h("div", { class: "p-meta" }, t("seen", oneDate(item.seen))) : null,
+      item.osm ? h("a", { class: "p-link p-meta", target: "_blank", rel: "noopener",
+        href: `https://www.openstreetmap.org/${item.osm}` }, t("osmLink"), " ↗") : null));
 }
 
 const onDay = (items, day) => items.filter((it) => day == null || !it.pos || it.pos.day === day);
-const named = (label, item) => (has(item.name) ? `${label}: ${pick(item.name)}` : label);
+
+/** Дарога на машыне ад дома паводле сэрвісу маршрутаў: да старту і, калі фініш далёка, ад фінішу. */
+function driveLines(drive) {
+  const line = (key, label) => {
+    const r = drive[key];
+    if (!r) return null;
+    return h("p", { class: "p-note" }, h("b", null, `${label}: `), t("driveLine", num(r.km, r.km < 20 ? 1 : 0), duration(r.minutes * 60)),
+      r.off ? h("span", { class: "p-muted" }, ` (${t("driveGap", num(r.off / 1000, 1))})`) : null);
+  };
+  return [h("p", { class: "p-title" }, t("driveFrom", pick(drive.from) || "…")),
+    line("to", t("driveTo")), line("back", t("driveBack")), source("srcDrive")];
+}
 
 function wayItem(w) {
   // даляры — разлік па курсе на дату: менш за 10 $ з дзясятымі, інакш цэлыя
@@ -106,8 +119,7 @@ function waterGroup(w, hike, day, openPhoto) {
     d?.drunk != null ? h("p", { class: "p-text" }, t("drunk", litres(d.drunk)), rates ? ` (${rates})` : "") : null,
     balance ? h("p", { class: "p-meta" }, balance) : null,
     has(w.note) ? h("p", { class: "p-text" }, pick(w.note)) : null,
-    sources.length ? h("ul", { class: "p-list" },
-      sources.map((s) => placedItem(s, named(t("sourceTypes")[s.type], s), flags(s), hike, openPhoto))) : null,
+    sources.length ? h("ul", { class: "p-list" }, sources.map((s) => placedItem("water", s, flags(s), hike, openPhoto))) : null,
   ]);
 }
 
@@ -183,23 +195,28 @@ export function renderPractical(hike, day, openPhoto) {
   const whole = day == null && hike.days.length > 1;
   const facts = day != null ? hike.days[day]?.facts : hike.facts;
   const p = hike.practical;
+  const drive = hike.drive?.to ? hike.drive : null;
   const nodes = facts ? factsBlock(facts, whole) : [];
+  const notes = (keys) => keys.map((k) => noteLine(t("noteLabels")[k], p.notes[k])).filter(Boolean);
+  const ways = p?.gettingThere || [];
+  if (ways.length || has(p?.notes.parking) || drive) {
+    const own = ways.length || has(p?.notes.parking);
+    const rateDays = [...new Set(ways.filter((w) => w.usd != null).map((w) => w.rateDate))];
+    const hint = ways.length ? t("waysCount", ways.length)
+      : drive ? t("driveLine", num(drive.to.km, 0), duration(drive.to.minutes * 60)) : null;
+    nodes.push(group(t("gettingThere"), hint, [
+      ways.length ? h("ul", { class: "p-list" }, ways.map(wayItem)) : null,
+      own ? [...notes(["parking"]), source("srcAuthor")] : null,
+      rateDays.length ? h("p", { class: "p-source" }, t("srcRate", rateDays.map(oneDate).join(", "))) : null,
+      drive ? h("div", { class: own ? "p-part" : null }, driveLines(drive)) : null,
+    ], null));
+  }
   if (p) {
-    const notes = (keys) => keys.map((k) => noteLine(t("noteLabels")[k], p.notes[k])).filter(Boolean);
-    if (p.gettingThere.length || has(p.notes.parking)) {
-      const rateDays = [...new Set(p.gettingThere.filter((w) => w.usd != null).map((w) => w.rateDate))];
-      nodes.push(group(t("gettingThere"), p.gettingThere.length ? t("waysCount", p.gettingThere.length) : null, [
-        p.gettingThere.length ? h("ul", { class: "p-list" }, p.gettingThere.map(wayItem)) : null,
-        ...notes(["parking"]),
-        source("srcAuthor"),
-        rateDays.length ? h("p", { class: "p-source" }, t("srcRate", rateDays.map(oneDate).join(", "))) : null,
-      ], null));
-    }
     if (p.water) nodes.push(waterGroup(p.water, hike, day, openPhoto));
     const places = onDay(p.places, day);
     if (places.length) {
       nodes.push(group(t("places"), String(places.length), [h("ul", { class: "p-list" },
-        places.map((it) => placedItem(it, named(t("placeTypes")[it.type], it), [], hike, openPhoto)))]));
+        places.map((it) => placedItem("place", it, [], hike, openPhoto)))]));
     }
     const trail = notes(["surface", "marking", "obstacles", "signal", "dangers", "gear", "season"]);
     if (trail.length) nodes.push(group(t("trail"), null, trail));
@@ -208,6 +225,13 @@ export function renderPractical(hike, day, openPhoto) {
   }
   const weather = weatherGroup(hike, day);
   if (weather) nodes.push(weather);
+  const hints = onDay(hike.hints || [], day);
+  if (hints.length) {
+    nodes.push(group(t("hints"), String(hints.length), [
+      h("p", { class: "p-text" }, t("hintsIntro")),
+      h("ul", { class: "p-list" }, hints.map((it) => placedItem(it.kind, it, [], hike, openPhoto))),
+    ], "srcOsm"));
+  }
   if (p?.checked) nodes.push(h("p", { class: "p-source" }, t("checked", oneDate(p.checked))));
   return nodes.length ? [h("h2", null, t("practical")), ...nodes] : null;
 }

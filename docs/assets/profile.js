@@ -19,11 +19,14 @@ function ticks(min, max, count) {
   return { step, values: out };
 }
 
+const MARK_REACH = 7; // пікселяў: наколькі блізка да кропкі трэба навесці, каб убачыць яе назву
+
 /**
  * days: [{ segs: [[[lng, lat, alt, km], ...], ...], color }] — km назапашваецца ў межах дня
  * onHover(point|null): point = { lng, lat, alt, km, day }
+ * marks: [{ day, km, kind: "water"|"place", hint, title }] — крыніцы вады і месцы; day — індэкс у days
  */
-export function renderProfile(container, days, onHover) {
+export function renderProfile(container, days, onHover, marks = []) {
   const tip = h("div", { class: "tooltip", hidden: true });
   const svg = s("svg", { tabindex: "0", role: "img" });
   container.replaceChildren(svg, tip);
@@ -31,15 +34,17 @@ export function renderProfile(container, days, onHover) {
   // Плоскі спіс кропак з назапашанай адлегласцю праз усе дні.
   const pts = [];
   const series = [];
+  const starts = []; // назапашаная адлегласць на пачатку кожнага дня
   let offset = 0;
   days.forEach((d, di) => {
+    starts.push(offset);
     for (const seg of d.segs) {
       const start = pts.length;
       for (const [lng, lat, alt, km] of seg) {
         if (alt == null) continue;
         pts.push({ lng, lat, alt, km: offset + km, day: di });
       }
-      if (pts.length > start) series.push({ from: start, to: pts.length, color: d.color });
+      if (pts.length > start) series.push({ from: start, to: pts.length, color: d.color, day: di });
     }
     const lastSeg = d.segs[d.segs.length - 1];
     offset += lastSeg?.length ? lastSeg[lastSeg.length - 1][3] : 0;
@@ -59,7 +64,34 @@ export function renderProfile(container, days, onHover) {
   svg.setAttribute("aria-label",
     `${t("profile")}: ${num(xMax, 1)} ${t("km")}, ${num(minAlt)}–${num(maxAlt)} ${t("m")}`);
 
+  /**
+   * Месца кропкі на профілі: яе ўласны кіламетр і вышыня па прамой паміж суседнімі пунктамі таго ж адрэзка.
+   * Трэк на сайце спрошчаны, таму бліжэйшы пункт можа быць далёка — кропка не павінна «прыліпаць» да яго.
+   */
+  function place(mark) {
+    const km = starts[mark.day] + mark.km;
+    let edge = null; // найбліжэйшы канец адрэзка — калі кіламетр па-за адрэзкамі дня
+    for (const ser of series) {
+      if (ser.day !== mark.day) continue;
+      if (km >= pts[ser.from].km && km <= pts[ser.to - 1].km) {
+        let lo = ser.from, hi = ser.to - 1;
+        while (hi - lo > 1) {
+          const mid = (lo + hi) >> 1;
+          if (pts[mid].km <= km) lo = mid; else hi = mid;
+        }
+        const a = pts[lo], b = pts[hi];
+        const part = b.km > a.km ? (km - a.km) / (b.km - a.km) : 0;
+        return { km, alt: a.alt + (b.alt - a.alt) * part };
+      }
+      for (const p of [pts[ser.from], pts[ser.to - 1]]) {
+        if (!edge || Math.abs(p.km - km) < Math.abs(edge.km - km)) edge = p;
+      }
+    }
+    return edge && { km: edge.km, alt: edge.alt };
+  }
+
   let width = 0, sx, sy, cross, dot, active = -1;
+  let placed = []; // кропкі з месцам на малюнку: { x, mark }
 
   function draw() {
     width = container.clientWidth;
@@ -98,12 +130,25 @@ export function renderProfile(container, days, onHover) {
       );
     }
 
+    // Крыніцы вады і месцы — кружкі на лініі профілю; падказкі OpenStreetMap бляднейшыя, з пункцірам.
+    const markLayer = s("g");
+    placed = [];
+    for (const mark of marks) {
+      if (starts[mark.day] == null || !Number.isFinite(mark.km)) continue;
+      const p = place(mark);
+      if (!p) continue;
+      placed.push({ x: sx(p.km), mark });
+      markLayer.append(s("circle", {
+        class: `mark mark-${mark.kind}${mark.hint ? " mark-hint" : ""}`, cx: sx(p.km).toFixed(1), cy: sy(p.alt).toFixed(1), r: 4,
+      }));
+    }
+
     cross = s("line", { class: "cross", y1: M.top, y2: base, visibility: "hidden" });
     dot = s("circle", { class: "dot", r: 4.5, visibility: "hidden" });
     const hit = s("rect", { x: M.left, y: 0, width: iw, height: HEIGHT, fill: "transparent" });
     svg.replaceChildren(grid,
       s("line", { class: "baseline", x1: M.left, x2: width - M.right, y1: Math.round(base) + 0.5, y2: Math.round(base) + 0.5 }),
-      shapes, labels, cross, dot, hit);
+      shapes, labels, markLayer, cross, dot, hit);
     if (active >= 0) show(active);
   }
 
@@ -116,16 +161,20 @@ export function renderProfile(container, days, onHover) {
     return km - pts[lo].km < pts[hi].km - km ? lo : hi;
   }
 
-  function show(i) {
+  /** pointer — X паказальніка: назва кропкі шукаецца каля яго, бо перакрыжаванне скача па пунктах трэку. */
+  function show(i, pointer = null) {
     active = i;
     const p = pts[i];
     const x = sx(p.km), y = sy(p.alt);
+    const from = pointer ?? x;
     cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("visibility", "visible");
     dot.setAttribute("cx", x); dot.setAttribute("cy", y);
     dot.setAttribute("fill", series.find((ser) => i >= ser.from && i < ser.to)?.color || "currentColor");
     dot.setAttribute("visibility", "visible");
     const [altText, kmText] = t("altAt", num(p.alt), num(p.km, 1));
-    tip.replaceChildren(h("strong", null, altText), h("span", null, kmText));
+    const near = placed.filter((m) => Math.abs(m.x - from) <= MARK_REACH).sort((a, b) => Math.abs(a.x - from) - Math.abs(b.x - from))[0];
+    tip.replaceChildren(h("strong", null, altText), h("span", null, kmText),
+      near ? h("span", { class: "tip-mark" }, near.mark.title) : "");
     tip.hidden = false;
     const half = tip.offsetWidth / 2;
     tip.style.left = `${Math.min(Math.max(x, half), width - half)}px`;
@@ -145,7 +194,7 @@ export function renderProfile(container, days, onHover) {
     const r = svg.getBoundingClientRect();
     const x = e.clientX - r.left;
     if (x < M.left - 4 || x > width - M.right + 4) return hide();
-    show(nearest(((x - M.left) / (width - M.left - M.right)) * xMax));
+    show(nearest(((x - M.left) / (width - M.left - M.right)) * xMax), x);
   }
 
   function onKey(e) {

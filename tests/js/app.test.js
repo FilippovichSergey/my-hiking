@@ -30,6 +30,7 @@ class FakeMap {
   getSource(id) { return this.sources[id]; }
   getCanvas() { return { style: {} }; }
   getBearing() { return 0; }
+  getZoom() { return this.zoom ?? 12; }
   addControl() {} setLayoutProperty() {} setPaintProperty() {} setFeatureState() {}
   fitBounds(...args) { (this.fits ||= []).push(args); }
   flyTo() {} easeTo() {} resize() {} setTerrain() {} setSky() {}
@@ -45,6 +46,13 @@ const maplibregl = {
     setDOMContent(node) { maplibregl.Popup.content = node; return this; }
     addTo() { return this; }
     remove() {}
+  },
+  Marker: class {
+    static all = []; // кропкі (крыніцы вады і месцы), якія цяпер стаяць на карце
+    constructor({ element }) { this.element = element; }
+    setLngLat(at) { this.at = at; return this; }
+    addTo() { maplibregl.Marker.all.push(this); return this; }
+    remove() { maplibregl.Marker.all = maplibregl.Marker.all.filter((m) => m !== this); }
   },
   LngLatBounds: class { extend() { return this; } },
 };
@@ -312,7 +320,7 @@ test("сартаванне, фільтры па нагрузцы і «Скіну
 
   panel().querySelector(".reset").click();
   assert.deepEqual(titles(), ["guria", "late", "slow", "broken", "mismatch", "notrack", "trek3"], "усе паходы, сартаванне застаецца");
-  assert.deepEqual([...panel().querySelectorAll(".filter-row select")].map((el) => el.value), ["", "", "", "", ""]);
+  assert.deepEqual([...panel().querySelectorAll(".filter-row select")].map((el) => el.value), ["", "", "", "", "", ""]);
   assert.equal(panel().querySelector(".reset"), null);
   assert.equal(panel().querySelector("select.sort").value, "up");
 
@@ -511,4 +519,109 @@ test("практычная інфармацыя: разлік па трэку, �
   assert.equal(panel().querySelector(".p-facts, .p-group"), null);
   assert.ok(![...panel().querySelectorAll(".detail h2")].some((el) => el.textContent === "Практычная інфармацыя"));
   await go("#/be");
+});
+
+test("кропкі на карце, падказкі OpenStreetMap, дарога на машыне і фільтр па ўмовах", async () => {
+  // даныя этапу 3 дадаюцца паходу «guria» толькі на час гэтага тэста
+  const guria = DATA.hikes.find((hk) => hk.slug === "guria");
+  Object.assign(guria, {
+    facts: { ...FACTS, start: { ...FACTS.start, place: pair("Мілісі", "Milisi") } },
+    hints: [
+      { kind: "water", type: "spring", name: pair("Цёплая", "Warm"), osm: "node/101", pos: { day: 0, km: 0.4, at: [42.01, 41.01], alt: 920, off: 80 } },
+      { kind: "place", type: "viewpoint", name: pair(), osm: "way/202", pos: { day: 0, km: 3.1, at: [42.07, 41.07], alt: 990 } },
+    ],
+    drive: { from: pair("Батумі, парк Качынскіх", "Batumi, Kaczyński Park"), to: { km: 42.1, minutes: 63, off: 1200 }, back: { km: 12.4, minutes: 25 } },
+  });
+  const slow = DATA.hikes.find((hk) => hk.slug === "slow");
+  try {
+    await go("#/be/guria");
+    await waitFor(() => maplibregl.Marker.all.length === 4, "кропкі паходу на карце");
+    const markers = () => maplibregl.Marker.all;
+    assert.deepEqual(markers().map((m) => [m.element.className, m.at, m.element.getAttribute("aria-label")]), [
+      ["poi poi-water", [42, 41], "Крыніца"],
+      ["poi poi-place", [42.05, 41.05], "Альтанка або навес: Альтанка"],
+      ["poi poi-water poi-hint", [42.01, 41.01], "Крыніца: Цёплая"],
+      ["poi poi-place poi-hint", [42.07, 41.07], "Аглядная пляцоўка"],
+    ], "запісы аўтара і падказкі OpenStreetMap адрозніваюцца класам");
+    assert.ok(markers().every((m) => m.element.querySelector("svg.poi-icon")), "у кожнай кропкі ёсць значок");
+    const popup = (i) => {
+      markers()[i].element.dispatchEvent(new window.Event("mouseenter"));
+      return [...maplibregl.Popup.content.children].map((el) => el.textContent);
+    };
+    assert.deepEqual(popup(0), ["Крыніца", "1 км ад старту · 950 м · 09:00", "Мае назіранні"]);
+    assert.deepEqual(popup(2), ["Крыніца: Цёплая", "0,4 км ад старту · 920 м · збоку ад трэку, 80 м", "З OpenStreetMap, мной не праверана"]);
+
+    // падказак бывае шмат: на аддаленай карце застаюцца толькі запісы аўтара
+    const mapEl = document.getElementById("map");
+    FakeMap.last.zoom = 9;
+    FakeMap.last.fire("zoom");
+    assert.ok(mapEl.classList.contains("hints-far"));
+    FakeMap.last.zoom = 13;
+    FakeMap.last.fire("zoom");
+    assert.ok(!mapEl.classList.contains("hints-far"));
+
+    // старонка паходу: назва населенага пункта, дарога на машыне і падказкі — кожнае са сваёй крыніцай
+    const rows = Object.fromEntries([...panel().querySelectorAll(".p-facts dt")].map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+    assert.equal(rows["Старт"], "Мілісі · 08:00 · 900 м Маршрут да старту ↗");
+    assert.equal(rows["Фініш"], "12:30 · 910 м", "без назвы — як раней");
+    assert.equal(panel().querySelector(".p-facts + .p-source").textContent, "Разлік па трэку; назвы населеных пунктаў — з OpenStreetMap");
+    const groups = [...panel().querySelectorAll(".p-group")];
+    assert.deepEqual(groups.map((g) => g.querySelector("summary").textContent),
+      ["Як дабрацца1 варыянт", "ВадаВыпіта 2 л · 1 крыніца", "Асаблівыя месцы1", "Сцежка і ўмовы", "Надвор'е", "Падказкі з OpenStreetMap2"]);
+    const DRIVE = "Разлік сэрвісу маршрутаў OSRM па дарогах OpenStreetMap — без уліку затораў і стану дарогі";
+    assert.deepEqual([...groups[0].querySelectorAll(".p-source")].map((el) => el.textContent), ["Мае назіранні", DRIVE]);
+    assert.deepEqual([...groups[0].querySelectorAll(".p-part .p-title, .p-part .p-note")].map((el) => el.textContent), [
+      "На машыне ад: Батумі, парк Качынскіх",
+      "да старту: 42 км, каля 1 г 03 хв (аўтадарога сканчаецца за 1,2 км ад гэтага пункта)",
+      "ад фінішу назад: 12,4 км, каля 25 хв",
+    ]);
+    const hints = groups[5];
+    assert.deepEqual([...hints.querySelectorAll(".p-title, .p-meta")].map((el) => el.textContent), [
+      "Крыніца: Цёплая", "0,4 км ад старту · 920 м · збоку ад трэку, 80 м", "на карце OSM ↗",
+      "Аглядная пляцоўка", "3,1 км ад старту · 990 м", "на карце OSM ↗",
+    ]);
+    assert.deepEqual([...hints.querySelectorAll("a")].map((a) => a.getAttribute("href")),
+      ["https://www.openstreetmap.org/node/101", "https://www.openstreetmap.org/way/202"]);
+    assert.deepEqual([...hints.querySelectorAll(".p-source")].map((el) => el.textContent), ["З OpenStreetMap, мной не праверана"]);
+    assert.equal(hints.querySelectorAll(".poi.poi-hint").length, 2, "у спісе той жа значок, што на карце");
+    assert.equal(groups[1].querySelectorAll(".poi.poi-water:not(.poi-hint)").length, 1, "крыніца аўтара — без пазнакі падказкі");
+
+    await go("#/en/guria");
+    await waitFor(() => markers()[2]?.element.getAttribute("aria-label") === "Spring: Warm", "кропкі па-англійску");
+    assert.equal(markers().length, 4, "старыя кропкі прыбраныя, а не падвоеныя");
+    assert.equal([...panel().querySelectorAll(".p-group summary")].at(-1).textContent, "Hints from OpenStreetMap2");
+    assert.equal(popup(3).at(-1), "From OpenStreetMap, not checked by me");
+
+    await go("#/be");
+    assert.equal(markers().length, 0, "у спісе паходаў кропак на карце няма");
+
+    // фільтр па ўмовах — толькі паводле звестак аўтара і толькі тыя ўмовы, пра якія ёсць звесткі
+    const titles = () => [...panel().querySelectorAll(".card-title")].map((el) => el.textContent);
+    const cond = () => panel().querySelector('.filter-row select[aria-label="Любыя ўмовы"]');
+    const choose = (value) => {
+      cond().value = value;
+      cond().dispatchEvent(new window.Event("change"));
+    };
+    assert.deepEqual([...cond().options].map((o) => [o.value, o.textContent]), [["", "Любыя ўмовы"], ["water", "Ёсць вада на маршруце"]]);
+    choose("water");
+    assert.deepEqual(titles(), ["guria"]);
+    panel().querySelector(".reset").click();
+
+    guria.practical.gettingThere.push({ ...guria.practical.gettingThere[0], type: "marshrutka" });
+    slow.hints = guria.hints; // падказкі OpenStreetMap пра ваду ў фільтр не ідуць
+    await go("#/be/slow");
+    await go("#/be");
+    assert.deepEqual([...cond().options].map((o) => o.value), ["", "water", "transit"]);
+    choose("transit");
+    assert.deepEqual(titles(), ["guria"]);
+    choose("water");
+    assert.deepEqual(titles(), ["guria"], "паход толькі з падказкамі OpenStreetMap не лічыцца паходам з вадой");
+    panel().querySelector(".reset").click();
+  } finally {
+    guria.facts = FACTS;
+    guria.practical.gettingThere.splice(1);
+    delete guria.hints;
+    delete guria.drive;
+    delete slow.hints;
+  }
 });
