@@ -649,3 +649,25 @@ test("пры адкрытым паходзе на карце застаецца 
   await go("#/be");
   assert.deepEqual(shown(), ["visible", "visible"], "пасля вяртання да спіса трэкі зноў відаць");
 });
+
+test("сартаванне спіса не мяняе парадак кропак на карце (і склад груп маркераў)", async () => {
+  await go("#/be");
+  const onMap = (source) => FakeMap.last.sources[source].data.features.map((f) => f.properties.slug);
+  const sortBy = (key) => {
+    const select = panel().querySelector("select.sort");
+    select.value = key;
+    select.dispatchEvent(new window.Event("change"));
+  };
+  const titles = () => [...panel().querySelectorAll(".card-title")].map((el) => el.textContent);
+  const stable = [...DATA.hikes.map((hk) => hk.slug)].sort();
+  const seen = {};
+  for (const key of ["new", "short", "up", "old"]) {
+    sortBy(key);
+    seen[key] = titles();
+    assert.deepEqual(onMap("hikes"), stable, `кропкі пры сартаванні «${key}»`);
+    assert.deepEqual(onMap("lines"), stable.filter((slug) => DATA.hikes.find((hk) => hk.slug === slug).lines.length),
+      `трэкі пры сартаванні «${key}»`);
+  }
+  assert.notDeepEqual(seen.new, seen.short, "сам спіс пры гэтым перасартоўваецца");
+  sortBy("new");
+});

@@ -282,7 +282,10 @@ export function createMap(el, { onSelect, popupExtra }) {
   const api = {
     updateControls,
 
-    setHikes(hikes) {
+    setHikes(list) {
+      // Карта аб'ядноўвае блізкія маркеры па чарзе, таму склад груп залежыць ад парадку кропак. Парадак тут
+      // сталы (па назве файла паходу), а не як у спісе: інакш сартаванне спіса перакідвала б паход з групы ў групу.
+      const hikes = [...list].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
       hikesBySlug = new Map(hikes.map((hk) => [hk.slug, hk]));
       map.getSource("hikes").setData({
         type: "FeatureCollection",
