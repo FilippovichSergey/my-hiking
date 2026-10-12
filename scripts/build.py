@@ -20,9 +20,9 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 import practical
-from common import (CACHE, CONTENT, DOCS, has_track, iso_date, load_config, photo_name, read_version, load_yaml, read_json, site_photos_dir, slugify,
+from common import (CACHE, CONTENT, DOCS, has_track, iso_date, lat_lng, load_config, photo_name, read_version, load_yaml, read_json, site_photos_dir, slugify,
                     text_pair, tour_local_datetime, write_json)
-from geo import haversine, names_key, simplify
+from geo import haversine, names_key, region_with_ru, simplify
 
 PILLOW_EXT = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 MAGICK_EXT = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
@@ -624,9 +624,11 @@ def main(argv=None) -> None:
             for item, first, last in [(facts, raw[0], raw[-1])] + [(d["facts"], r, r) for d, r in zip(days, raw)]:
                 for edge, p in (("start", practical._points(first)[0]), ("finish", practical._points(last)[-1])):
                     names = place_cache.get(names_key(p[0], p[1]))
-                    if isinstance(names, dict) and (names.get("be") or names.get("en")):
-                        item[edge] = {**item[edge], "place": {"be": names.get("be") or names["en"],
-                                                              "en": names.get("en") or names["be"]}}
+                    if isinstance(names, dict) and any(names.get(lang) for lang in ("be", "en", "ru")):
+                        place = {"be": names.get("be") or names.get("en") or "", "en": names.get("en") or names.get("be") or ""}
+                        if names.get("ru"):
+                            place["ru"] = names["ru"]
+                        item[edge] = {**item[edge], "place": place}
 
         start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
         if not start:
@@ -650,10 +652,13 @@ def main(argv=None) -> None:
             point = lines[0][0]
             bbox = [min(p[0] for p in all_pts), min(p[1] for p in all_pts),
                     max(p[0] for p in all_pts), max(p[1] for p in all_pts)]
-        elif h.get("location"):
-            point = [float(h["location"][1]), float(h["location"][0])]
+        elif lat_lng(h.get("location")):
+            lat, lng = lat_lng(h["location"])
+            point = [lng, lat]
         elif photo_gps:
             point = photo_gps
+        if h.get("location") is not None and not lines and lat_lng(h["location"]) is None:
+            print(f"  ! {slug}: няправільны location: {h['location']} (трэба [шырата, даўгата]) — не выкарыстаны")
         if not point:
             print(f"  ! {slug}: няма ні трэку, ні location — паход не з'явіцца на карце")
 
@@ -695,7 +700,7 @@ def main(argv=None) -> None:
             "date": start,
             "end": end,
             "title": text_pair(h.get("title")),
-            "region": text_pair(h.get("region")),
+            "region": region_with_ru(text_pair(h.get("region"))),
             "difficulty": difficulty,
             "stats": stats,
             "facts": facts,          # разлік па трэку: тып маршруту, старт і фініш, светлавы дзень, тэмп

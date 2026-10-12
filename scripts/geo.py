@@ -8,21 +8,29 @@ import requests
 
 from common import CACHE, read_json, write_json
 
-# Рэгіёны Грузіі па кодзе ISO 3166-2 (Nominatim часта не мае беларускіх назваў).
+# Рэгіёны Грузіі па кодзе ISO 3166-2 (Nominatim часта не мае беларускіх назваў): беларуская, англійская, руская.
 REGIONS = {
-    "GE-AB": ("Абхазія", "Abkhazia"),
-    "GE-AJ": ("Аджарыя", "Adjara"),
-    "GE-GU": ("Гурыя", "Guria"),
-    "GE-IM": ("Імерэці", "Imereti"),
-    "GE-KA": ("Кахеці", "Kakheti"),
-    "GE-KK": ("Квема-Картлі", "Kvemo Kartli"),
-    "GE-MM": ("Мцхета-Мтыянеці", "Mtskheta-Mtianeti"),
-    "GE-RL": ("Рача-Лечхумі і Квема-Сванеці", "Racha-Lechkhumi and Kvemo Svaneti"),
-    "GE-SJ": ("Самцхе-Джавахеці", "Samtskhe-Javakheti"),
-    "GE-SK": ("Шыда-Картлі", "Shida Kartli"),
-    "GE-SZ": ("Самегрэла-Зема-Сванеці", "Samegrelo-Zemo Svaneti"),
-    "GE-TB": ("Тбілісі", "Tbilisi"),
+    "GE-AB": ("Абхазія", "Abkhazia", "Абхазия"),
+    "GE-AJ": ("Аджарыя", "Adjara", "Аджария"),
+    "GE-GU": ("Гурыя", "Guria", "Гурия"),
+    "GE-IM": ("Імерэці", "Imereti", "Имеретия"),
+    "GE-KA": ("Кахеці", "Kakheti", "Кахетия"),
+    "GE-KK": ("Квема-Картлі", "Kvemo Kartli", "Квемо-Картли"),
+    "GE-MM": ("Мцхета-Мтыянеці", "Mtskheta-Mtianeti", "Мцхета-Мтианети"),
+    "GE-RL": ("Рача-Лечхумі і Квема-Сванеці", "Racha-Lechkhumi and Kvemo Svaneti", "Рача-Лечхуми и Квемо-Сванети"),
+    "GE-SJ": ("Самцхе-Джавахеці", "Samtskhe-Javakheti", "Самцхе-Джавахети"),
+    "GE-SK": ("Шыда-Картлі", "Shida Kartli", "Шида-Картли"),
+    "GE-SZ": ("Самегрэла-Зема-Сванеці", "Samegrelo-Zemo Svaneti", "Самегрело-Земо Сванети"),
+    "GE-TB": ("Тбілісі", "Tbilisi", "Тбилиси"),
 }
+
+
+def region_with_ru(region: dict) -> dict:
+    """Рэгіён з рускай назвай: калі яе не напісалі ў файле паходу, яна бярэцца з табліцы па англійскай або беларускай."""
+    if region.get("ru"):
+        return region
+    ru = next((r for be, en, r in REGIONS.values() if region.get("en") == en or region.get("be") == be), "")
+    return {**region, "ru": ru} if ru else region
 GEOCODE_CACHE = CACHE / "geocode.json"
 _last_request = 0.0
 
@@ -51,17 +59,20 @@ def region_for_point(lat: float, lng: float) -> dict:
             addr_en = _nominatim(lat, lng, "en")
             code = addr_en.get("ISO3166-2-lvl4", "")
             if code in REGIONS:
-                be, en = REGIONS[code]
+                be, en, ru = REGIONS[code]
             else:
                 addr_be = _nominatim(lat, lng, "be")
+                addr_ru = _nominatim(lat, lng, "ru")
                 en = addr_en.get("state") or addr_en.get("country", "")
                 be = addr_be.get("state") or addr_be.get("country", "") or en
+                ru = addr_ru.get("state") or addr_ru.get("country", "") or en
         except requests.RequestException as exc:
             print(f"  ! рэгіён для {key} не вызначаны: {exc}")
-            return {"be": "", "en": ""}
-        cache[key] = {"be": be, "en": en}
+            return {"be": "", "en": "", "ru": ""}
+        cache[key] = {"be": be, "en": en, "ru": ru}
         write_json(GEOCODE_CACHE, cache)
-    return cache[key]
+    found = region_with_ru(cache[key])  # запісы кэша, зробленыя да рускай мовы, — без ru
+    return {"be": found["be"], "en": found["en"], "ru": found.get("ru", "")}
 
 
 def place_name(lat: float, lng: float) -> str:
@@ -98,23 +109,34 @@ def names_key(lat: float, lng: float) -> str:
 
 
 def place_names(lat: float, lng: float) -> dict | None:
-    """Бліжэйшы населены пункт на дзвюх мовах {be, en} — для старту і фінішу. Патрэбна сетка; вынік у кэшы.
+    """Бліжэйшы населены пункт {be, en, ru} — для старту і фінішу. Патрэбна сетка; вынік у кэшы.
 
-    Беларускай назвы ў OpenStreetMap часта няма — тады бярэцца англійская (а не руская). None — сэрвіс не адказаў.
+    Беларускай назвы ў OpenStreetMap часта няма — тады бярэцца англійская (а не руская). Руская назва — толькі
+    сапраўды руская: калі яе няма, ru пусты і сайт паказвае назву па-беларуску або па-англійску.
+    Запіс кэша без ru (зроблены да рускай мовы) дапаўняецца адным запытам. None — сэрвіс не адказаў.
     """
     key = names_key(lat, lng)
+    # Пытаецца сам пункт ключа, а не дакладныя каардынаты: розныя пункты адной клеткі (~100 м) маглі б даць
+    # розныя населеныя пункты, і назвы на розных мовах, спампаваныя ў розны час, не супалі б.
+    lat, lng = float(f"{lat:.3f}"), float(f"{lng:.3f}")
     cache = read_json(GEOCODE_CACHE, {})
-    if key not in cache:
+    entry = cache.get(key)
+    if entry is None or "ru" not in entry:
+        asked = (["be,en", "en"] if entry is None else []) + ["ru,en"]
         try:
             found = [str(next((addr[k] for k in _SETTLEMENT if addr.get(k)), "")).strip()
-                     for addr in (_nominatim(lat, lng, "be,en", 14), _nominatim(lat, lng, "en", 14))]
+                     for addr in (_nominatim(lat, lng, lang, 14) for lang in asked)]
         except (requests.RequestException, ValueError, AttributeError) as exc:
             print(f"  ! назва месца для {lat:.3f}, {lng:.3f} не вызначана: {exc}")
             return None
+        if entry is None:
+            entry = {"be": found[0] or found[1], "en": found[1] or found[0]}
+        ru = found[-1]
+        entry = {**entry, "ru": ru if ru not in (entry["en"], entry["be"]) or ru == "" else ""}
         cache = read_json(GEOCODE_CACHE, {})
-        cache[key] = {"be": found[0] or found[1], "en": found[1] or found[0]}
+        cache[key] = entry
         write_json(GEOCODE_CACHE, cache)
-    return cache[key]
+    return entry
 
 
 # --- Геаметрыя ---------------------------------------------------------------

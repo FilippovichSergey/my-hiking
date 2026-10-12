@@ -671,3 +671,117 @@ test("сартаванне спіса не мяняе парадак кропа�
   assert.notDeepEqual(seen.new, seen.short, "сам спіс пры гэтым перасартоўваецца");
   sortBy("new");
 });
+
+test("руская мова: пераключальнік, адрас #/ru, тэксты і запасная беларуская", async () => {
+  await go("#/be");
+  const buttons = () => [...document.querySelectorAll("[data-lang]")];
+  assert.deepEqual(buttons().map((b) => [b.dataset.lang, b.textContent]), [["be", "BY"], ["ru", "RU"], ["en", "EN"]]);
+  // рускія тэксты — толькі на час гэтага тэста: назва ў аднаго паходу і рэгіён Гурыя (у Аджарыі рускай назвы няма)
+  const guria = DATA.hikes.find((hk) => hk.slug === "guria");
+  const saved = { title: guria.title };
+  guria.title = { be: "guria", en: "guria", ru: "Гурийский поход" };
+  const gurian = DATA.hikes.filter((hk) => hk.region.en === "Guria");
+  for (const hk of gurian) hk.region.ru = "Гурия";
+  const titles = () => [...panel().querySelectorAll(".card-title")].map((el) => el.textContent);
+  try {
+    document.querySelector('[data-lang="ru"]').click();
+    await tick(60);
+    assert.equal(window.location.hash, "#/ru");
+    assert.equal(document.documentElement.lang, "ru");
+    assert.deepEqual(buttons().map((b) => b.getAttribute("aria-pressed")), ["false", "true", "false"]);
+    assert.equal(document.getElementById("site-title").textContent, "Мои походы");
+    assert.equal(panel().querySelector(".result-count").textContent, "7 походов");
+    assert.equal(panel().querySelector(".search").placeholder, "Поиск по названию или региону");
+    assert.deepEqual(titles(), ["slow", "Гурийский поход", "broken", "mismatch", "late", "notrack", "trek3"],
+      "руская назва, а дзе яе няма — беларуская");
+    const regions = panel().querySelector('.filter-row select[aria-label="Все регионы"]');
+    assert.deepEqual([...regions.options].map((o) => o.textContent), ["Все регионы", "Аджарыя", "Гурия"],
+      "рэгіён без рускай назвы — па-беларуску");
+    const card = [...panel().querySelectorAll(".card")].find((el) => el.querySelector(".card-title").textContent === "Гурийский поход");
+    assert.equal(card.querySelector(".card-meta").textContent, "1 января 2025 · Гурия");
+    assert.ok(card.querySelector(".card-nums").textContent.includes("Очень тяжело"));
+
+    // пошук знаходзіць паход па назве на любой мове
+    const search = (text) => {
+      const input = panel().querySelector(".search");
+      input.value = text;
+      input.dispatchEvent(new window.Event("input"));
+      return titles();
+    };
+    assert.deepEqual(search("гурийск"), ["Гурийский поход"]);
+    assert.deepEqual(search("гурия"), ["Гурийский поход", "mismatch", "late", "notrack", "trek3"], "рэгіён па-руску — усе паходы Гурыі");
+    assert.equal(search("").length, 7);
+
+    await go("#/ru/guria");
+    await waitFor(() => panel().querySelector(".detail h1")?.textContent === "Гурийский поход", "старонка паходу па-руску");
+    assert.equal(document.title, "Гурийский поход · Мои походы");
+    assert.ok([...panel().querySelectorAll(".detail h2")].some((el) => el.textContent === "Практическая информация"));
+    const rows = Object.fromEntries([...panel().querySelectorAll(".p-facts dt")].map((dt) => [dt.textContent, dt.nextElementSibling.textContent]));
+    assert.equal(rows["Тип маршрута"], "Кольцевой");
+    assert.equal(rows["Световой день"], "06:00–20:00 · после финиша оставалось 7 ч 30 мин света");
+    assert.equal(panel().querySelector(".p-facts + .p-source").textContent, "Расчёт по треку");
+    const groups = [...panel().querySelectorAll(".p-group summary")].map((el) => el.textContent);
+    assert.deepEqual(groups, ["Как добраться1 вариант", "ВодаВыпито 2 л · 1 источник", "Особые места1", "Тропа и условия", "Погода"]);
+    assert.equal(panel().querySelector(".p-group .p-title").textContent, "Такси · Батумі → Вёска", "звесткі аўтара без рускага тэксту — па-беларуску");
+    assert.equal(panel().querySelector(".back").textContent, "← Все походы");
+
+    // спасылка на паход захоўвае мову; невядомая мова ў адрасе мову не мяняе
+    let copied = null;
+    Object.defineProperty(window.navigator, "clipboard", { value: { writeText: async (text) => { copied = text; } }, configurable: true });
+    [...panel().querySelectorAll(".actions .link-btn")].at(-1).click();
+    await tick();
+    assert.equal(copied, "http://localhost/#/ru/guria");
+    await go("#/de/guria");
+    assert.equal(document.documentElement.lang, "ru");
+    assert.ok(panel().querySelector(".hike-list"), "невядомы адрас — спіс паходаў");
+
+    document.querySelector('[data-lang="be"]').click();
+    await tick(60);
+    assert.equal(window.location.hash, "#/be");
+    assert.equal(document.getElementById("site-title").textContent, "Мае паходы");
+    assert.equal(titles()[1], "guria");
+  } finally {
+    Object.assign(guria, saved);
+    for (const hk of gurian) delete hk.region.ru;
+    delete window.navigator.clipboard;
+    if (document.documentElement.lang !== "be") document.querySelector('[data-lang="be"]').click();
+  }
+});
+
+test("рэгіён з назвай толькі па-руску ёсць у фільтры (review v1.7.0, №2)", async () => {
+  await go("#/be");
+  const slow = DATA.hikes.find((hk) => hk.slug === "slow");
+  const broken = DATA.hikes.find((hk) => hk.slug === "broken");
+  const saved = [slow.region, broken.region];
+  slow.region = { be: "", en: "", ru: "Кавказ" };
+  broken.region = { be: "Альпы", en: "Alps", ru: "Альпы (ru)" };
+  const titles = () => [...panel().querySelectorAll(".card-title")].map((el) => el.textContent);
+  const regions = () => panel().querySelector(".filter-row select"); // першы фільтр — рэгіён
+  const options = () => [...regions().options].map((o) => [o.value, o.textContent]);
+  try {
+    await go("#/be/slow"); // перамалёўка спіса з новымі данымі
+    await go("#/be");
+    assert.deepEqual(options(), [["", "Усе рэгіёны"], ["Alps", "Альпы"], ["Guria", "Гурыя"], ["Кавказ", "Кавказ"]]);
+    regions().value = "Кавказ";
+    regions().dispatchEvent(new window.Event("change"));
+    assert.deepEqual(titles(), ["slow"]);
+    assert.equal(panel().querySelector(".card-meta").textContent, "1 студзеня 2025 · Кавказ");
+
+    document.querySelector('[data-lang="en"]').click(); // ключ рэгіёна не залежыць ад мовы: фільтр застаецца
+    await tick(60);
+    assert.equal(regions().value, "Кавказ");
+    assert.deepEqual(titles(), ["slow"]);
+    assert.deepEqual(options().map(([, text]) => text), ["All regions", "Alps", "Guria", "Кавказ"]);
+    document.querySelector('[data-lang="ru"]').click();
+    await tick(60);
+    assert.deepEqual(options(), [["", "Все регионы"], ["Alps", "Альпы (ru)"], ["Guria", "Гурыя"], ["Кавказ", "Кавказ"]]);
+    regions().value = "Alps";
+    regions().dispatchEvent(new window.Event("change"));
+    assert.deepEqual(titles(), ["broken"]);
+    panel().querySelector(".reset").click();
+  } finally {
+    [slow.region, broken.region] = saved;
+    document.querySelector('[data-lang="be"]').click();
+    await tick(60);
+  }
+});

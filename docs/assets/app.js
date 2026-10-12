@@ -2,7 +2,7 @@
 import { copyText, cssVar, downloadFile, h, s } from "./dom.js";
 import { gpxText } from "./gpx.js";
 import { renderPractical } from "./practical.js";
-import { dateRange, duration, lang, num, pick, setLang, shortDate, t } from "./i18n.js";
+import { dateRange, durationParts, lang, LANGS, num, pick, setLang, shortDate, t } from "./i18n.js";
 import { createMap } from "./map.js";
 import { hikePois } from "./pois.js";
 import { renderProfile } from "./profile.js";
@@ -28,14 +28,18 @@ let map, profile, renderToken = 0;
 
 // --- Мова і тэма ------------------------------------------------------------
 
+// адрас старонкі: #/<мова> або #/<мова>/<паход>
+const ROUTE_RE = new RegExp(`^#/(${LANGS.join("|")})(?:/([\\w-]+))?`);
+
 function initialLang() {
-  const fromHash = location.hash.match(/^#\/(be|en)\b/);
+  const fromHash = location.hash.match(ROUTE_RE);
   if (fromHash) return fromHash[1];
   try {
     const saved = localStorage.getItem("lang");
-    if (saved) return saved;
+    if (LANGS.includes(saved)) return saved;
   } catch {}
-  return /^(be|ru|uk)/i.test(navigator.language || "") ? "be" : "en";
+  const browser = navigator.language || "";
+  return /^ru/i.test(browser) ? "ru" : /^(be|uk)/i.test(browser) ? "be" : "en";
 }
 
 const darkMq = matchMedia("(prefers-color-scheme: dark)");
@@ -101,7 +105,7 @@ function applyLangChrome() {
 function go(slug) { location.hash = slug ? `#/${lang}/${slug}` : `#/${lang}`; }
 
 function route() {
-  const m = location.hash.match(/^#\/(be|en)(?:\/([\w-]+))?/);
+  const m = location.hash.match(ROUTE_RE);
   const newLang = m ? m[1] : lang;
   if (newLang !== lang) {
     setLang(newLang);
@@ -121,7 +125,7 @@ function route() {
 // --- Фільтры і агульная статыстыка ------------------------------------------
 
 /** Ключ рэгіёна не залежыць ад мовы інтэрфейсу, каб фільтр перажываў пераключэнне BE/EN. */
-function regionKey(hk) { return hk.region.en || hk.region.be || ""; }
+function regionKey(hk) { return hk.region.en || hk.region.be || hk.region.ru || ""; }
 
 // Нагрузка: агульная адлегласць паходу (км) і колькасць дзён.
 const DISTANCES = { short: [0, 10], mid: [10, 20], long: [20, Infinity] };
@@ -161,7 +165,13 @@ function filtered() {
     (!days || DAY_COUNTS[days](dayCount(hk))) &&
     (!type || hk.facts?.type === type) &&
     (!cond || CONDITIONS[cond](hk)) &&
-    (!needle || [hk.title.be, hk.title.en, hk.region.be, hk.region.en].some((s) => s?.toLowerCase().includes(needle))));
+    (!needle || LANGS.flatMap((l) => [hk.title[l], hk.region[l]]).some((s) => s?.toLowerCase().includes(needle))));
+}
+
+/** Працягласць для пліткі: лічбы буйна, адзінкі дробна, як у астатніх плітках — інакш на тэлефоне
+ *  «6 ч 49 мин» і «6 h 49 min» не змяшчаюцца ў плітку. */
+function durationValue(sec) {
+  return durationParts(sec).flatMap(([value, unit], i) => [`${i ? " " : ""}${value}`, h("small", null, unit)]);
 }
 
 function tile(label, value, unit, sub) {
@@ -422,8 +432,8 @@ async function renderDetail(hike, fit = true) {
       tile(t("distance"), num(dayStats.distance, 1), t("km")),
       tile(t("up"), num(dayStats.up), t("m")),
       tile(t("down"), num(dayStats.down), t("m")),
-      tile(t("duration"), duration(dayStats.duration)),
-      tile(t("moving"), duration(dayStats.moving)),
+      tile(t("duration"), durationValue(dayStats.duration)),
+      tile(t("moving"), durationValue(dayStats.moving)),
       tile(t("maxAlt"), dayStats.maxAlt != null ? num(dayStats.maxAlt) : "—", dayStats.maxAlt != null ? t("m") : null),
     ) : h("p", { class: "notice" }, t("noTrack")),
 

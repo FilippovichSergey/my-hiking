@@ -195,9 +195,11 @@ def render_yaml(h: dict, today: str) -> str:
     lines += [
         "title:",
         f"  be: {yaml_str(h['title'])}",
+        '  ru: ""                    # калі пуста, паказваецца беларуская назва',
         '  en: ""                    # калі пуста, паказваецца беларуская назва',
         "region:",
         f"  be: {yaml_str(h['region']['be'])}",
+        f"  ru: {yaml_str(h['region'].get('ru', ''))}",
         f"  en: {yaml_str(h['region']['en'])}",
         "difficulty:                 # easy | medium | hard | expert",
         f"photos_folder: {yaml_str(h['folder'] or '')}   # фота з падтэчкі «Сайт» або «для сайту»",
@@ -221,6 +223,8 @@ def render_yaml(h: dict, today: str) -> str:
     lines += [
         "impressions:",
         "  be: |",
+        "    ",
+        "  ru: |",
         "    ",
         "  en: |",
         "    ",
@@ -336,7 +340,7 @@ def main(argv=None) -> None:
             if sp:
                 g["title"] = place_name(sp["lat"], sp["lng"]) or g["title"]
         g["title"] = g["title"][:1].upper() + g["title"][1:]
-        g["region"] = {"be": "", "en": ""}
+        g["region"] = {"be": "", "en": "", "ru": ""}
         if g["tours"] and g["tours"][0].get("start_point"):
             sp = g["tours"][0]["start_point"]
             g["region"] = region_for_point(sp["lat"], sp["lng"])

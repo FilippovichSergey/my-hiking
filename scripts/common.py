@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -70,9 +71,16 @@ def load_yaml(path: Path) -> dict:
 
 
 def text_pair(value) -> dict:
-    """Тэкст на дзвюх мовах: {be, en} або проста радок (тады гэта беларускі тэкст)."""
+    """Тэкст на мовах сайта: {be, en} і, калі ён ёсць, ru; або проста радок (тады гэта беларускі тэкст).
+
+    Рускага тэксту можа не быць: тады ключа ru няма, а сайт паказвае беларускі.
+    """
     if isinstance(value, dict):
-        return {"be": (value.get("be") or "").strip(), "en": (value.get("en") or "").strip()}
+        pair = {"be": (value.get("be") or "").strip(), "en": (value.get("en") or "").strip()}
+        ru = (value.get("ru") or "").strip()
+        if ru:
+            pair["ru"] = ru
+        return pair
     return {"be": (value or "").strip(), "en": ""}
 
 
@@ -80,6 +88,20 @@ def photo_name(photo: dict) -> str:
     """Імя апублікаванага фота без «-t»: калі замест поўнай копіі ў індэксе мініяцюра, src таксама на яе."""
     stem = Path(photo["src"]).stem
     return stem[:-2] if photo["src"] == photo["thumb"] and stem.endswith("-t") else stem
+
+
+def lat_lng(value) -> tuple[float, float] | None:
+    """Каардынаты з YAML: спіс роўна з двух лікаў [шырата, даўгата] у дапушчальных межах; іншае — None.
+
+    Правяраецца сама форма запісу: радок «41.53, 41.82» (забытыя дужкі) чытаўся б па знаках як шырата 4 і
+    даўгата 1, а true/false — як 1 і 0, і на карце з'явілася б месца за тысячы кіламетраў.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in value):
+        return None
+    lat, lng = float(value[0]), float(value[1])
+    return (lat, lng) if abs(lat) <= 90 and abs(lng) <= 180 else None
 
 
 def has_track(coords) -> bool:

@@ -4,11 +4,10 @@
 // drive — дарога на машыне паводле сэрвісу маршрутаў; hints — месцы з OpenStreetMap каля трэку.
 // Пад кожнай часткай падпісана, адкуль даныя.
 import { h } from "./dom.js";
-import { dateRange, duration, num, pick, shortDate, t } from "./i18n.js";
+import { dateRange, duration, hasText as has, num, pick, shortDate, t } from "./i18n.js";
 import { poiIcon, poiTitle, poiWhere } from "./pois.js";
 
 const join = (parts, sep = " · ") => parts.filter(Boolean).join(sep);
-const has = (pair) => Boolean(pair && (pair.be || pair.en));
 const oneDate = (iso) => dateRange(iso, iso);
 const source = (key) => h("p", { class: "p-source" }, t(key));
 const row = (label, ...content) => [h("dt", null, label), h("dd", null, content)];

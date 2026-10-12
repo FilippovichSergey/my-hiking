@@ -812,7 +812,10 @@ class FetchProject(PracticalProject):
         def fake_nominatim(lat, lng, lang, zoom=5):
             self.calls.append(("names", (round(lat, 3), round(lng, 3), lang, zoom)))
             answer = names(lat, lng, lang) if callable(names) else names
-            return {"village": answer["en" if lang == "en" else "be"]} if answer else {}
+            if not answer:
+                return {}
+            name = (answer.get("ru") or answer["en"]) if lang.startswith("ru") else answer["en" if lang == "en" else "be"]
+            return {"village": name}
 
         out = io.StringIO()
         with unittest.mock.patch("requests.Session.get", fake_get), unittest.mock.patch("requests.Session.post", fake_post), \
@@ -1002,14 +1005,15 @@ class TestHintsAndDrive(FetchProject):
         far = osm_node(3, 500, -300, amenity="drinking_water")  # у вобласці запыту, але за 300 м ад трэку
         stop = osm_node(4, 0, 10, amenity="shelter", shelter_type="public_transport")
         _, out = self.fetch(osm=[VIEW, far, stop, SPRING])
-        self.assertEqual(sorted(self.kinds()), ["names", "names", "osm", "route", "weather"])
+        self.assertEqual(sorted(self.kinds()), ["names", "names", "names", "osm", "route", "weather"])
         calls = dict(self.calls)
         bbox = practical.osm_bbox(practical.raw_days([1], 4))
         self.assertEqual(bbox, [40.996, 41.996, 41.013, 42.016])
         self.assertIn('node["natural"="spring"](40.996,41.996,41.013,42.016);', calls["osm"])
         self.assertTrue(calls["osm"].startswith("[out:json]") and calls["osm"].endswith("out center tags;"))
         self.assertEqual(calls["route"], "41.59822,41.62692;42.0,41.0", "ад парку да старту: даўгата,шырата")
-        self.assertEqual([c for kind, c in self.calls if kind == "names"], [(41.0, 42.0, "be,en", 14), (41.0, 42.0, "en", 14)])
+        self.assertEqual([c for kind, c in self.calls if kind == "names"],
+                         [(41.0, 42.0, "be,en", 14), (41.0, 42.0, "en", 14), (41.0, 42.0, "ru,en", 14)])
         for line in ("OpenStreetMap — 3 аб'ектаў у вобласці трэку", "на машыне да старту 42.1 км, 63 хв",
                      "OpenStreetMap: паходаў 1. Маршрутаў на машыне: 1. Назваў месцаў: 1."):
             self.assertIn(line, out)
@@ -1074,7 +1078,8 @@ practical:
         self.assertNotIn("place", index["h"]["facts"]["start"])
         self.assertIn("падказак OpenStreetMap або дарогі на машыне няма для паходаў: 1", out)
         self.fetch(osm=[osm_node(6, 5500, 0, natural="spring")])
-        self.assertEqual(sorted(self.kinds()), ["names", "names", "osm", "route", "weather"], "для новага трэку ўсё пытаецца зноў")
+        self.assertEqual(sorted(self.kinds()), ["names", "names", "names", "osm", "route", "weather"],
+                         "для новага трэку ўсё пытаецца зноў")
         index, out = self.build()
         self.assertEqual([(q["osm"], q["pos"]["km"]) for q in index["h"]["hints"]], [("node/6", 0.5)])
         self.assertIsNotNone(index["h"]["drive"])
@@ -1089,7 +1094,7 @@ practical:
         self.fetch(osm=[osm_node(1, 1000, 50, natural="spring"), osm_node(2, 5000, -40, leisure="firepit")],
                    route=lambda url: next(routes), names=names)
         self.assertEqual(self.kinds().count("route"), 2, "да старту і ад далёкага фінішу")
-        self.assertEqual(self.kinds().count("names"), 6, "тры розныя пункты: старт, начлег, фініш")
+        self.assertEqual(self.kinds().count("names"), 9, "тры розныя пункты (старт, начлег, фініш) на трох мовах")
         h = self.build()[0]["h"]
         self.assertEqual(h["drive"]["to"], {"km": 42.1, "minutes": 63})
         self.assertEqual(h["drive"]["back"], {"km": 12.4, "minutes": 25, "off": 1200}, "дарога не даходзіць да фінішу 1,2 км")
@@ -1132,7 +1137,7 @@ practical:
         _, out = self.fetch(osm={"elements": [SPRING], "remark": "runtime error: Query timed out"}, route=NO_ROUTE, names=None)
         self.assertIn("OpenStreetMap не адказаў (паходаў: 1) — runtime error: Query timed out", out)
         self.assertFalse((build.CACHE / "osm" / "h.json").exists())
-        self.assertEqual(common.read_json(geo.GEOCODE_CACHE), {"names:41.000,42.000": {"be": "", "en": ""}},
+        self.assertEqual(common.read_json(geo.GEOCODE_CACHE), {"names:41.000,42.000": {"be": "", "en": "", "ru": ""}},
                          "населенага пункта побач няма — гэта таксама адказ, ён не перапытваецца")
 
         # паўтор пасля занятага сервера ўдаецца
@@ -1159,14 +1164,39 @@ practical:
             self.fetch(route=bad)
             self.assertFalse((build.CACHE / "routes.json").exists(), bad)
 
-    def test_place_names_are_settlements_in_two_languages(self):
-        answers = {"be,en": {"hamlet": " Хутар ", "municipality": "Раён"}, "en": {"county": "County", "municipality": "District"}}
-        with unittest.mock.patch.object(geo, "_nominatim", lambda lat, lng, lang, zoom=5: answers[lang]):
-            self.assertEqual(geo.place_names(41.0004, 42.0), {"be": "Хутар", "en": "Хутар"}, "без перакладу — тая ж назва")
+    def test_place_names_are_settlements_in_three_languages(self):
+        answers = {"be,en": {"hamlet": " Хутар ", "municipality": "Раён"}, "en": {"county": "County", "municipality": "District"},
+                   "ru,en": {"hamlet": "Хутор"}}
+        asked = []
+
+        def nominatim(lat, lng, lang, zoom=5):
+            asked.append(lang)
+            return answers[lang]
+
+        with unittest.mock.patch.object(geo, "_nominatim", nominatim):
+            self.assertEqual(geo.place_names(41.0004, 42.0), {"be": "Хутар", "en": "Хутар", "ru": "Хутор"},
+                             "без англійскай назвы — беларуская; руская — асобна")
+            self.assertEqual(asked, ["be,en", "en", "ru,en"])
             answers["be,en"] = {"municipality": "Раён"}
-            self.assertEqual(geo.place_names(41.0004, 42.0), {"be": "Хутар", "en": "Хутар"}, "з кэша, без новага запыту")
-            self.assertEqual(geo.place_names(41.5, 42.0), {"be": "", "en": ""}, "муніцыпалітэт — не населены пункт")
-        self.assertEqual(sorted(common.read_json(geo.GEOCODE_CACHE)), ["names:41.000,42.000", "names:41.500,42.000"])
+            self.assertEqual(geo.place_names(41.0004, 42.0)["be"], "Хутар", "з кэша")
+            self.assertEqual(len(asked), 3, "без новага запыту")
+            answers["ru,en"] = {"municipality": "Район"}
+            self.assertEqual(geo.place_names(41.5, 42.0), {"be": "", "en": "", "ru": ""}, "муніцыпалітэт — не населены пункт")
+            # рускай назвы ў OpenStreetMap няма: сэрвіс аддае англійскую — яна рускай не лічыцца
+            answers.update({"be,en": {"village": "Kedkedi"}, "en": {"village": "Kedkedi"}, "ru,en": {"village": "Kedkedi"}})
+            self.assertEqual(geo.place_names(41.7, 42.0), {"be": "Kedkedi", "en": "Kedkedi", "ru": ""})
+            # запіс кэша, зроблены да рускай мовы, дапаўняецца адным запытам
+            cache = common.read_json(geo.GEOCODE_CACHE)
+            cache["names:41.900,42.000"] = {"be": "Мілісі", "en": "Milisi"}
+            common.write_json(geo.GEOCODE_CACHE, cache)
+            answers["ru,en"] = {"village": "Милиси"}
+            del asked[:]
+            self.assertEqual(geo.place_names(41.9, 42.0), {"be": "Мілісі", "en": "Milisi", "ru": "Милиси"})
+            self.assertEqual(asked, ["ru,en"])
+            self.assertEqual(geo.place_names(41.9, 42.0)["ru"], "Милиси")
+            self.assertEqual(asked, ["ru,en"], "другі раз — з кэша")
+        self.assertEqual(sorted(common.read_json(geo.GEOCODE_CACHE)),
+                         ["names:41.000,42.000", "names:41.500,42.000", "names:41.700,42.000", "names:41.900,42.000"])
 
     def test_without_home_there_is_no_drive(self):
         self.hike()
@@ -1578,6 +1608,262 @@ class TestReview162(FetchProject):
         points = practical.weather_points(practical.raw_days([1], 4)[0])
         hours = practical.weather_hours(points)
         self.assertEqual((hours[0] % 3600, hours[0] <= points[0]["ts"] + 1800, hours[-1] >= points[-1]["ts"] - 1800), (0, True, True))
+
+
+class TestRussian(FetchProject):
+    """Руская мова: тэкст {be, en, ru}, рэгіёны, назвы населеных пунктаў і падказак, чарнавік паходу."""
+
+    def test_text_in_three_languages(self):
+        self.assertEqual(common.text_pair({"be": " А ", "en": "A", "ru": " Б "}), {"be": "А", "en": "A", "ru": "Б"})
+        self.assertEqual(common.text_pair({"be": "А", "ru": "  "}), {"be": "А", "en": ""}, "пустога рускага тэксту няма")
+        self.assertEqual(common.text_pair("А"), {"be": "А", "en": ""})
+        self.assertEqual(common.text_pair({"ru": "Б"}), {"be": "", "en": "", "ru": "Б"})
+        with self.assertRaises(AttributeError):
+            common.text_pair({"be": "А", "ru": 5})
+
+    def test_build_publishes_russian_texts_and_regions(self):
+        self.cfg = {**self.cfg, "home": {"name": {"be": "Батумі", "ru": "Батуми", "en": "Batumi"}, "point": [41.62692, 41.59822]}}
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        (self.content / "h.yaml").write_text("""\
+date: 2025-06-01
+komoot: [1]
+title: {be: Возера, ru: Озеро, en: Lake}
+region: {be: Аджарыя, en: Adjara}
+impressions: {be: Добра., ru: Хорошо.}
+practical:
+  surface: {be: Грунт., ru: Грунт и камни.}
+  getting_there:
+    - {type: taxi, to: {be: Мілісі, ru: Милиси}}
+  places:
+    - {type: shelter, km: 1, name: {be: Альтанка, ru: Беседка}, note: {be: Стол., ru: Стол и скамейки.}}
+""", encoding="utf-8")
+        self.fetch(names={"be": "Мілісі", "en": "Milisi", "ru": "Милиси"},
+                   osm=[osm_node(1, 500, -100, natural="spring", name="Tsqaro", **{"name:ru": "Тёплый"}), VIEW])
+        h = self.build()[0]["h"]
+        self.assertEqual(h["title"], {"be": "Возера", "en": "Lake", "ru": "Озеро"})
+        self.assertEqual(h["region"], {"be": "Аджарыя", "en": "Adjara", "ru": "Аджария"}, "руская назва рэгіёна — з табліцы")
+        self.assertEqual(h["impressions"], {"be": "Добра.", "en": "", "ru": "Хорошо."})
+        p = h["practical"]
+        self.assertEqual(p["notes"]["surface"]["ru"], "Грунт и камни.")
+        self.assertEqual((p["gettingThere"][0]["to"]["ru"], p["gettingThere"][0]["from"]["ru"]), ("Милиси", "Батуми"),
+                         "адкуль — па змаўчанні home з config.yaml")
+        self.assertEqual((p["places"][0]["name"]["ru"], p["places"][0]["note"]["ru"]), ("Беседка", "Стол и скамейки."))
+        self.assertEqual(h["drive"]["from"], {"be": "Батумі", "en": "Batumi", "ru": "Батуми"})
+        for facts in (h["facts"], h["days"][0]["facts"]):
+            self.assertEqual(facts["start"]["place"], {"be": "Мілісі", "en": "Milisi", "ru": "Милиси"})
+        self.assertEqual([q["name"] for q in h["hints"]],
+                         [{"be": "Tsqaro", "en": "Tsqaro", "ru": "Тёплый"}, {"be": "", "en": ""}], "руская назва — толькі калі яна ёсць")
+
+        # рэгіён з рускай назвай у файле — яна і застаецца; невядомы рэгіён — без рускай
+        self.assertEqual(geo.region_with_ru({"be": "Аджарыя", "en": "Adjara", "ru": "Аджарская АР"})["ru"], "Аджарская АР")
+        self.assertEqual(geo.region_with_ru({"be": "Гурыя", "en": ""}), {"be": "Гурыя", "en": "", "ru": "Гурия"})
+        self.assertEqual(geo.region_with_ru({"be": "Альпы", "en": "Alps"}), {"be": "Альпы", "en": "Alps"})
+        self.assertEqual(geo.region_with_ru({"be": "", "en": ""}), {"be": "", "en": ""})
+
+    def test_old_name_cache_gets_russian_names_with_one_request(self):
+        self.hike()
+        common.write_json(geo.GEOCODE_CACHE, {"names:41.000,42.000": {"be": "Мілісі", "en": "Milisi"}})
+        self.assertNotIn("ru", self.build()[0]["h"]["facts"]["start"]["place"], "да `hike fetch` рускай назвы няма")
+        _, out = self.fetch(names={"be": "Мілісі", "en": "Milisi", "ru": "Милиси"})
+        self.assertEqual([c for kind, c in self.calls if kind == "names"], [(41.0, 42.0, "ru,en", 14)])
+        self.assertIn("Назваў месцаў: 1.", out)
+        self.assertEqual(self.build()[0]["h"]["facts"]["start"]["place"], {"be": "Мілісі", "en": "Milisi", "ru": "Милиси"})
+        self.fetch()
+        self.assertNotIn("names", [kind for kind, _ in self.calls])
+        # рускай назвы няма — пытанне не паўтараецца, на сайце яе таксама няма
+        common.write_json(geo.GEOCODE_CACHE, {"names:41.000,42.000": {"be": "Kedkedi", "en": "Kedkedi"}})
+        self.fetch(names={"be": "Kedkedi", "en": "Kedkedi"})
+        self.assertEqual(common.read_json(geo.GEOCODE_CACHE)["names:41.000,42.000"], {"be": "Kedkedi", "en": "Kedkedi", "ru": ""})
+        self.fetch(names={"be": "Kedkedi", "en": "Kedkedi"})
+        self.assertNotIn("names", [kind for kind, _ in self.calls])
+        self.assertEqual(self.build()[0]["h"]["facts"]["start"]["place"], {"be": "Kedkedi", "en": "Kedkedi"})
+
+    def test_region_and_draft_have_russian(self):
+        with unittest.mock.patch.object(geo, "_nominatim", lambda lat, lng, lang, zoom=5: {"ISO3166-2-lvl4": "GE-GU"}):
+            self.assertEqual(geo.region_for_point(41.9, 42.1), {"be": "Гурыя", "en": "Guria", "ru": "Гурия"})
+        # рэгіён у кэшы з часоў да рускай мовы
+        common.write_json(geo.GEOCODE_CACHE, {"41.60,41.60": {"be": "Аджарыя", "en": "Adjara"}})
+        self.assertEqual(geo.region_for_point(41.6, 41.6), {"be": "Аджарыя", "en": "Adjara", "ru": "Аджария"})
+        abroad = {"en": {"state": "Tyrol", "country": "Austria"}, "be": {"country": "Аўстрыя"}, "ru": {"state": "Тироль"}}
+        with unittest.mock.patch.object(geo, "_nominatim", lambda lat, lng, lang, zoom=5: abroad[lang]):
+            self.assertEqual(geo.region_for_point(47.2, 11.4), {"be": "Аўстрыя", "en": "Tyrol", "ru": "Тироль"})
+        self.assertEqual(len({names[2] for names in geo.REGIONS.values()}), len(geo.REGIONS), "у кожнага рэгіёна свая руская назва")
+
+        draft = scaffold.render_yaml({"start": date(2025, 1, 2), "title": "Гара", "folder": None, "tours": [], "videos": [],
+                                      "region": {"be": "Гурыя", "en": "Guria", "ru": "Гурия"}}, "2025-01-03")
+        parsed = yaml.safe_load(draft)
+        self.assertEqual(parsed["title"], {"be": "Гара", "ru": "", "en": ""})
+        self.assertEqual(parsed["region"], {"be": "Гурыя", "ru": "Гурия", "en": "Guria"})
+        self.assertEqual(sorted(parsed["impressions"]), ["be", "en", "ru"])
+        old = scaffold.render_yaml({"start": date(2025, 1, 2), "title": "Гара", "folder": None, "tours": [], "videos": [],
+                                    "region": {"be": "Гурыя", "en": "Guria"}}, "2025-01-03")
+        self.assertEqual(yaml.safe_load(old)["region"]["ru"], "", "рэгіён без рускай назвы не ламае чарнавік")
+
+
+class TestReview170(FetchProject):
+    """Рэгрэсіі па review_2026-10-13_v1.7.0.md."""
+
+    def profile_tour(self, points, alt, minutes=240):
+        """Тур з роўным ходам і вышынёй `alt(метраў на поўнач ад пачатку)` у кожным пункце."""
+        n = len(points) - 1
+        self.add_tour(1, "2025-06-01T04:00:00Z", points,
+                      coords=[[lat, lng, alt((lat - 41.0) / M), i / n * minutes * 60000] for i, (lat, lng) in enumerate(points)])
+
+    def test_notes_written_only_in_russian_are_published(self):  # №1
+        self.hike()
+        keys = practical.NOTE_KEYS
+        notes = "".join(f"  {key}: {{ru: 'Заметка {key}.'}}\n" for key in keys)
+        (self.content / "h.yaml").write_text(
+            "date: 2025-06-01\ntitle: {ru: Поход}\nkomoot: [1]\npractical:\n  weather_notes: {ru: Туман.}\n" + notes, encoding="utf-8")
+        index, out = self.build()
+        p = index["h"]["practical"]
+        self.assertIsNotNone(p, "звесткі толькі па-руску — таксама звесткі")
+        self.assertEqual(sorted(p["notes"]), sorted(keys))
+        self.assertEqual(p["notes"]["dangers"], {"be": "", "en": "", "ru": "Заметка dangers."})
+        self.assertEqual(p["weatherNotes"], {"be": "", "en": "", "ru": "Туман."})
+        self.assertEqual(index["h"]["title"], {"be": "", "en": "", "ru": "Поход"})
+        self.assertNotIn("practical:", out, "папярэджанняў няма")
+
+        # пустыя пераклады тэкстам не лічацца: без іншых звестак блока няма
+        (self.content / "h.yaml").write_text(
+            "date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\npractical:\n  weather_notes: {be: '', ru: '  '}\n"
+            "  dangers: {ru: ''}\n  surface: {en: ' '}\n", encoding="utf-8")
+        self.assertIsNone(self.build()[0]["h"]["practical"])
+        # адно поле на адной мове — і блок ёсць
+        (self.content / "h.yaml").write_text(
+            "date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\npractical:\n  dangers: {ru: Брод после дождя.}\n", encoding="utf-8")
+        self.assertEqual(self.build()[0]["h"]["practical"]["notes"], {"dangers": {"be": "", "en": "", "ru": "Брод после дождя."}})
+
+        # назва населенага пункта толькі па-руску таксама паказваецца
+        common.write_json(geo.GEOCODE_CACHE, {"names:41.000,42.000": {"be": "", "en": "", "ru": "Милиси"}})
+        self.assertEqual(self.build()[0]["h"]["facts"]["start"]["place"], {"be": "", "en": "", "ru": "Милиси"})
+
+    def test_time_and_photo_are_placed_between_recorded_points(self):  # №3
+        found = {}
+        for name, step in (("sparse", 1000.0), ("dense", 20.0)):
+            self.profile_tour(path((0, 0), (1000, 0), step=step), lambda north: 1000 + 0.4 * north)  # 08:00–12:00, 1000 → 1400 м
+            days = practical.raw_days([1], 4)
+            shots = {"A.jpg": "2025-06-01T09:36:00", "Early.jpg": "2025-06-01T07:45:00", "Late.jpg": "2025-06-01T12:20:00"}
+            got = []
+            for spec in ({"time": "09:12"}, {"photo": "A.jpg"}, {"photo": "Early.jpg"}, {"photo": "Late.jpg"}):
+                pos, problem = practical.locate(spec, days, shots)
+                self.assertIsNone(problem, (name, spec))
+                got.append((pos["km"], pos["alt"], pos["time"], round((pos["at"][1] - 41.0) / M / 10) * 10))
+            found[name] = got
+        self.assertEqual(found["sparse"], [(0.3, 1120, "09:12", 300), (0.4, 1160, "09:36", 400),
+                                           (0.0, 1000, "08:00", 0), (1.0, 1400, "12:00", 1000)],
+                         "месца, вышыня і кіламетр — на шуканы момант; каля мяжы запісу — яе крайні пункт")
+        self.assertEqual(found["sparse"], found["dense"], "вынік не залежыць ад шчыльнасці запісу")
+
+        # поўная зборка на разрэджаным трэку
+        self.profile_tour(path((0, 0), (1000, 0), step=1000.0), lambda north: 1000 + 0.4 * north)
+        (self.content / "h.yaml").write_text(
+            "date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\npractical:\n  places:\n"
+            "    - {type: shelter, time: \"09:12\"}\n    - {type: table, time: \"09:36\"}\n", encoding="utf-8")
+        index, out = self.build()
+        self.assertEqual([(q["pos"]["km"], q["pos"]["alt"], q["pos"]["time"]) for q in index["h"]["practical"]["places"]],
+                         [(0.3, 1120, "09:12"), (0.4, 1160, "09:36")])
+        self.assertNotIn("месца не вызначана", out)
+
+        # паміж рознымі турамі месца не выдумляецца
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (1000, 0), step=1000.0), duration=3600)   # 08:00–12:00
+        self.add_tour(2, "2025-06-01T12:00:00Z", path((30000, 0), (31000, 0), step=1000.0))               # 16:00–20:00
+        days = practical.raw_days([1, 2], 4)
+        pos, problem = practical.locate({"time": "14:00"}, days, {})
+        self.assertEqual((pos, "па-за часам трэку" in problem), (None, True))
+        self.assertEqual(practical.locate({"time": "18:00"}, days, {})[0]["km"], 1.5, "сярэдзіна другога тура")
+
+    def test_steepest_grade_uses_an_exact_500_m_window(self):  # №4
+        climb = lambda north: 1000 + 200 * min(north, 250) / 250            # 200 м набору на першых 250 м, далей роўна  # noqa: E731
+        drop = lambda north: 1200 - 200 * max(north - 750, 0) / 250          # роўна, на апошніх 250 м — спуск на 200 м  # noqa: E731
+        found = {}
+        for name, step in (("sparse", 5000.0), ("dense", 10.0)):
+            got = []
+            for corners, alt in (([(0, 0), (250, 0), (1000, 0)], climb), ([(0, 0), (750, 0), (1000, 0)], drop)):
+                self.profile_tour(path(*corners, step=step), alt)
+                day = practical.raw_days([1], 4)[0]
+                self.assertEqual(len(practical._points(day)), 3 if name == "sparse" else 101)
+                got.append(practical._steepest(day["segs"]))
+            found[name] = got
+        self.assertEqual(found["sparse"], [({"grade": 40, "km": 0.0}, None), (None, {"grade": 40, "km": 0.5})],
+                         "перапад 200 м на 500 м — 40 %, які б рэдкі ні быў запіс")
+        self.assertEqual(found["sparse"], found["dense"])
+
+        # тур карацейшы за 500 м ухілу «на 500 м» не мае; у зборцы — тое ж
+        self.profile_tour(path((0, 0), (400, 0)), lambda north: 1000 + north)
+        day = practical.raw_days([1], 4)[0]
+        self.assertEqual(practical._steepest(day["segs"]), (None, None))
+        self.profile_tour(path((0, 0), (250, 0), (1000, 0), step=5000.0), climb)
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+        facts = self.build()[0]["h"]["facts"]
+        self.assertEqual((facts["steepUp"], "steepDown" in facts), ({"grade": 40, "km": 0.0}, False))
+
+
+class TestReview171(FetchProject):
+    """Рэгрэсіі па review_2026-10-13_v1.7.1.md."""
+
+    def test_wrongly_written_coordinates_are_not_guessed(self):  # №1
+        bad = ['"41.53, 41.82"', "[true, false]", "[41.005]", "[41.005, 42.0, 900]", '["41.005", "42.0"]', "[91, 42]",
+               "[41, 181]", "[.nan, 42]", "{lat: 41.005, lng: 42.0}", "41.005"]
+        self.hike("practical:\n  places:\n" + "".join(f"    - {{type: shelter, at: {value}}}\n" for value in bad)
+                  + "    - {type: table, at: [41.005, 42.0]}\n    - {type: camp, at: [41, 42]}\n"
+                  "  water:\n    sources:\n      - {type: spring, at: \"41.53, 41.82\"}\n      - {type: tap, at: [true, false]}\n")
+        index, out = self.build()
+        p = index["h"]["practical"]
+        self.assertEqual(len(p["places"]), len(bad) + 2, "запісы застаюцца")
+        self.assertEqual([q["pos"] for q in p["places"][:len(bad)]], [None] * len(bad), "няправільна запісаныя каардынаты — без месца")
+        self.assertEqual([q["pos"] for q in p["water"]["sources"]], [None, None])
+        self.assertEqual(out.count("няправільныя каардынаты at:"), len(bad) + 2, "пра кожны такі запіс ёсць папярэджанне")
+        self.assertIn("places[1]: месца не вызначана — няправільныя каардынаты at: 41.53, 41.82 (трэба [шырата, даўгата])", out)
+        good, whole = p["places"][-2]["pos"], p["places"][-1]["pos"]
+        self.assertEqual((good["at"], good["km"], whole["at"], whole["km"]), ([42.0, 41.005], 0.6, [42.0, 41.0], 0.0),
+                         "правільная пара — і цэлыя лікі — працуюць як раней")
+        # сама праверка формы запісу
+        for value in bad:
+            self.assertIsNone(common.lat_lng(yaml.safe_load(value)), value)
+        self.assertEqual([common.lat_lng(v) for v in ([41.005, 42.0], (41, 42), [-90, 180], [0, 0])],
+                         [(41.005, 42.0), (41.0, 42.0), (-90.0, 180.0), (0.0, 0.0)])
+
+    def test_home_point_and_location_must_be_a_pair_of_numbers(self):
+        self.hike()
+        for point in ("41.62692, 41.59822", [True, False], [41.62692], [41.62692, 41.59822, 0], ["41.6", "41.5"]):
+            self.assertIsNone(practical.home_point({"point": point}), point)
+            self.cfg = {**CFG, "photos_root": str(self.photos_root), "home": {"name": "Дом", "point": point}}
+            self.fetch()
+            self.assertNotIn("route", [kind for kind, _ in self.calls], point)
+            self.assertIsNone(self.build()[0]["h"]["drive"], point)
+        self.assertEqual(practical.home_point({"point": [41.62692, 41.59822]}), (41.62692, 41.59822))
+
+        # паход без трэку: няправільны location не становіцца кропкай за тысячы кіламетраў і не спыняе зборку
+        for value in ('"41.65, 41.87"', "[true, false]", "[41.65]", "[41.65, 41.87, 5]"):
+            (self.content / "h.yaml").write_text(f"date: 2025-06-01\ntitle: {{be: H}}\nlocation: {value}\n", encoding="utf-8")
+            index, out = self.build()
+            self.assertIsNone(index["h"]["point"], value)
+            self.assertIn("няправільны location:", out, value)
+            self.assertIn("паход не з'явіцца на карце", out, value)
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nlocation: [41.65, 41.87]\n", encoding="utf-8")
+        index, out = self.build()
+        self.assertEqual(index["h"]["point"], [41.87, 41.65])
+        self.assertNotIn("location", out)
+
+
+class TestReview172(FetchProject):
+    """Рэгрэсіі па review_2026-10-13_v1.7.2.md."""
+
+    def test_wrong_travel_time_is_not_published_as_a_duration(self):  # №1
+        bad = ['"1:70"', '"0:99"', '"1:5"', '"1:²5"', '"1:10:00"', '"-1:10"', '"каля гадзіны"', "-5", "true", "[1, 10]"]
+        good = {'"1:10"': 70, "70": 70, "1:10": 70, '"24:00"': 1440, '"0:05"': 5, '" 2:30 "': 150, "0": 0, "45.4": 45}
+        ways = "".join(f"    - {{type: taxi, to: Мілісі, time: {value}}}\n" for value in [*bad, *good])
+        self.hike("practical:\n  getting_there:\n" + ways)
+        index, out = self.build()
+        got = index["h"]["practical"]["gettingThere"]
+        self.assertEqual(len(got), len(bad) + len(good), "запісы застаюцца")
+        self.assertEqual([w["minutes"] for w in got[:len(bad)]], [None] * len(bad), "няправільны час не становіцца працягласцю")
+        self.assertEqual([w["minutes"] for w in got[len(bad):]], list(good.values()))
+        self.assertEqual(out.count("getting_there.time: чакаюцца хвіліны або «г:хх» з хвілінамі 00–59"), len(bad),
+                         "пра кожны няправільны час ёсць папярэджанне")
+        self.assertIn("а не «1:70»", out)
+        self.assertEqual({w["to"]["be"] for w in got}, {"Мілісі"}, "астатнія палі запісу на месцы")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,7 @@
 // Кропкі паходу на карце і профілі вышыні: крыніцы вады і асаблівыя месцы.
 // Запісы аўтара (practical) — «Мае назіранні»; hints — аб'екты OpenStreetMap каля трэку, аўтарам не правераныя.
 import { s } from "./dom.js";
-import { num, pick, t } from "./i18n.js";
-
-const has = (pair) => Boolean(pair && (pair.be || pair.en));
+import { hasText as has, num, pick, t } from "./i18n.js";
 
 // Контурныя значкі 24×24; радок з аднаго-двух знакаў малюецца тэкстам.
 const ICONS = {

@@ -14,7 +14,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from common import CACHE, has_track, iso_date, photo_name, read_json, text_pair, tour_local_datetime
+from common import CACHE, has_track, iso_date, lat_lng, photo_name, read_json, text_pair, tour_local_datetime
 from geo import EARTH_R, haversine
 
 ROUTE_TYPES = ("loop", "out_and_back", "point_to_point", "mixed")
@@ -210,17 +210,25 @@ def _steepest(segs: list[list[tuple]]) -> tuple[dict | None, dict | None]:
     up = down = None
     for seg in segs:
         pts = [(p[4], p[2]) for p in seg if p[2] is not None]
-        j = 0
-        for i, (km, alt) in enumerate(pts):
-            j = max(j, i)
-            while j < len(pts) and pts[j][0] - km < STEEP_WINDOW_KM:
-                j += 1
-            if j >= len(pts):
-                break
-            grade = (pts[j][1] - alt) / ((pts[j][0] - km) * 1000) * 100
-            if grade > 0 and (up is None or grade > up["grade"]):
+        if len(pts) < 2 or pts[-1][0] - pts[0][0] < STEEP_WINDOW_KM:
+            continue  # тур карацейшы за акно
+        kms = [km for km, _ in pts]
+
+        def alt_at(km: float) -> float:
+            """Вышыня на кіламетры: па прамой паміж суседнімі пунктамі тура."""
+            i = min(max(bisect.bisect_right(kms, km), 1), len(pts) - 1)
+            (k0, a0), (k1, a1) = pts[i - 1], pts[i]
+            return a0 + (a1 - a0) * (km - k0) / (k1 - k0) if k1 > k0 else a1
+
+        # Профіль паміж пунктамі — прамыя, таму найбольшы перапад дае акно, якое пачынаецца або сканчаецца
+        # ў пункце. Даўжыня акна заўсёды роўна 500 м: вынік не залежыць ад шчыльнасці запісу.
+        first, last = kms[0], kms[-1] - STEEP_WINDOW_KM
+        starts = {km for km in kms if km <= last} | {km - STEEP_WINDOW_KM for km in kms if first <= km - STEEP_WINDOW_KM <= last}
+        for km in sorted(starts):
+            grade = (alt_at(km + STEEP_WINDOW_KM) - alt_at(km)) / (STEEP_WINDOW_KM * 1000) * 100
+            if grade > 0 and (up is None or grade > up["grade"] + 1e-9):
                 up = {"grade": grade, "km": km}
-            if grade < 0 and (down is None or -grade > down["grade"]):
+            if grade < 0 and (down is None or -grade > down["grade"] + 1e-9):
                 down = {"grade": -grade, "km": km}
     fmt = lambda s: {"grade": round(s["grade"]), "km": round(s["km"], 1)} if s and round(s["grade"]) >= 1 else None  # noqa: E731
     return fmt(up), fmt(down)
@@ -447,8 +455,10 @@ def osm_item(element: dict) -> dict | None:
     if found[0] == "water" and tags.get("drinking_water") == "no":
         return None  # вада пазначана як непітная — якім бы ні быў аб'ект
     name = str(tags.get("name") or "").strip()
-    return {"kind": found[0], "type": found[1], "lat": round(lat, 5), "lng": round(lng, 5),
-            "name": {"be": str(tags.get("name:be") or name).strip(), "en": str(tags.get("name:en") or name).strip()},
+    names = {"be": str(tags.get("name:be") or name).strip(), "en": str(tags.get("name:en") or name).strip()}
+    if str(tags.get("name:ru") or "").strip():
+        names["ru"] = str(tags["name:ru"]).strip()
+    return {"kind": found[0], "type": found[1], "lat": round(lat, 5), "lng": round(lng, 5), "name": names,
             "osm": f"{element.get('type', 'node')}/{element.get('id')}"}
 
 
@@ -502,12 +512,7 @@ def osm_hints(items: list[dict], days: list[dict], author: dict | None) -> list[
 
 def home_point(home) -> tuple | None:
     """Пункт `home.point` з config.yaml як (шырата, даўгата); None, калі яго няма або ён няправільны."""
-    point = home.get("point") if isinstance(home, dict) else None
-    try:
-        lat, lng = float(point[0]), float(point[1])
-    except (TypeError, ValueError, IndexError, KeyError):
-        return None
-    return (lat, lng) if math.isfinite(lat) and math.isfinite(lng) and abs(lat) <= 90 and abs(lng) <= 180 else None
+    return lat_lng(home.get("point")) if isinstance(home, dict) else None
 
 
 def drive_key(home: tuple, target: tuple, back: bool = False) -> str:
@@ -608,8 +613,12 @@ def _position(days: list[dict], di: int, point: tuple, off: float | None = None)
 
 
 def _by_time(days: list[dict], ts: float, only_day: int | None = None) -> dict | None:
-    """Пункт трэку, бліжэйшы па часе. Кожны адрэзак (тур) дня разглядаецца асобна: момант у доўгім
-    перапынку паміж турамі не мае месца на трэку — дапускаецца толькі PHOTO_TOLERANCE_S ад межаў запісу."""
+    """Месца на трэку ў момант `ts`. Кожны адрэзак (тур) дня разглядаецца асобна: момант у доўгім
+    перапынку паміж турамі не мае месца на трэку — дапускаецца толькі PHOTO_TOLERANCE_S ад межаў запісу.
+
+    Унутры тура месца, вышыня і кіламетр бяруцца па прамой паміж суседнімі па часе пунктамі (трэк можа быць
+    разрэджаны), час — сам шуканы момант. Момант каля мяжы запісу — яе крайні пункт.
+    """
     best = None
     for di, day in enumerate(days):
         if only_day is not None and di != only_day:
@@ -619,11 +628,15 @@ def _by_time(days: list[dict], ts: float, only_day: int | None = None) -> dict |
             if not pts or not pts[0][3] - PHOTO_TOLERANCE_S <= ts <= pts[-1][3] + PHOTO_TOLERANCE_S:
                 continue
             times = [p[3] for p in pts]
-            i = min(bisect.bisect_left(times, ts), len(pts) - 1)
-            if i and ts - times[i - 1] < times[i] - ts:
-                i -= 1
-            if best is None or abs(times[i] - ts) < best[0]:
-                best = (abs(times[i] - ts), di, pts[i])
+            if ts <= times[0] or ts >= times[-1]:
+                point = pts[0] if ts <= times[0] else pts[-1]
+                gap = abs(point[3] - ts)
+            else:
+                i = bisect.bisect_right(times, ts)  # times[i - 1] <= ts < times[i]
+                a, b = pts[i - 1], pts[i]
+                point, gap = _between(a, b, (ts - a[3]) / (b[3] - a[3])), 0.0
+            if best is None or gap < best[0]:
+                best = (gap, di, point)
     return _position(days, best[1], best[2]) if best else None
 
 
@@ -649,12 +662,10 @@ def locate(spec: dict, days: list[dict], photo_times: dict) -> tuple[dict | None
         only = day - 1
     tz = days[0]["tz"]
     if spec.get("at") is not None:
-        try:
-            lat, lng = float(spec["at"][0]), float(spec["at"][1])
-            if not (-90 <= lat <= 90 and -180 <= lng <= 180):
-                raise ValueError
-        except (TypeError, ValueError, IndexError, KeyError):
+        point = lat_lng(spec["at"])
+        if point is None:
             return None, f"няправільныя каардынаты at: {spec['at']} (трэба [шырата, даўгата])"
+        lat, lng = point
         found = _project(lat, lng, days, only)
         if found is None:
             return None, "няма трэку"
@@ -765,16 +776,19 @@ def _choice(value, allowed: tuple, what: str, warn, default=None):
     return key
 
 
+_TRAVEL_RE = re.compile(r"\s*([0-9]+):([0-5][0-9])\s*")  # гадзін можа быць больш за 23, хвілін — роўна дзве лічбы, 00–59
+
+
 def _travel_minutes(value, warn) -> int | None:
-    """Час у дарозе: хвіліны лікам або «г:хх»."""
+    """Час у дарозе: хвіліны лікам або «г:хх». Радок з хвілінамі па-за 00–59 («1:70») — памылка ўводу, а не 130 хвілін."""
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
         return round(value)
-    parts = str(value).split(":")
-    if len(parts) == 2 and all(p.strip().isdigit() for p in parts):
-        return int(parts[0]) * 60 + int(parts[1])
-    warn(f"getting_there.time: чакаюцца хвіліны або «г:хх», а не «{value}»")
+    m = _TRAVEL_RE.fullmatch(value) if isinstance(value, str) else None
+    if m:
+        return int(m[1]) * 60 + int(m[2])
+    warn(f"getting_there.time: чакаюцца хвіліны або «г:хх» з хвілінамі 00–59, а не «{value}»")
     return None
 
 
@@ -892,9 +906,9 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
 
     out: dict = {}
     notes = {key: _text(block.get(key), key, warn) for key in NOTE_KEYS}
-    out["notes"] = {key: pair for key, pair in notes.items() if pair["be"] or pair["en"]}
+    out["notes"] = {key: pair for key, pair in notes.items() if any(pair.values())}  # на любой мове сайта
     weather = _text(block.get("weather_notes"), "weather_notes", warn)
-    out["weatherNotes"] = weather if weather["be"] or weather["en"] else None
+    out["weatherNotes"] = weather if any(weather.values()) else None
 
     # --- вада: расход і крыніцы
     water_in = block.get("water")

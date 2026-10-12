@@ -16,6 +16,7 @@ youtube_channel: "https://www.youtube.com/@vlog_belarusa"
 home:
   name:
     be: "Батумі, парк Качынскіх"
+    ru: "Батуми, парк Качиньских"
     en: "Batumi, Kaczyński Park"
   point: [41.62692, 41.59822]   # [шырата, даўгата]
 

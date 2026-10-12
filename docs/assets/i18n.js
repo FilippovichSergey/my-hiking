@@ -1,6 +1,9 @@
 // Пераклады інтэрфейсу і фарматаванне лічбаў/дат.
 
-const STRINGS = {
+/** Мовы сайта ў парадку кнопак пераключальніка. */
+export const LANGS = ["be", "ru", "en"];
+
+export const STRINGS = {
   be: {
     siteTitle: "Мае паходы",
     siteDescription: "Карта маіх хайкінгаў: трэкі, фота, відэа і ўражанні.",
@@ -172,6 +175,176 @@ const STRINGS = {
     layers: { topo: "Тапакарта", sat: "Спадарожнік", plain: "Схема" },
     terrain3d: "3D-рэльеф",
     difficulty: { easy: "Лёгка", medium: "Сярэдне", hard: "Цяжка", expert: "Вельмі цяжка" },
+    altAt: (alt, km) => [`${alt} м`, `${km} км`],
+  },
+  ru: {
+    siteTitle: "Мои походы",
+    siteDescription: "Карта моих хайкингов: треки, фото, видео и впечатления.",
+    version: (v) => `версия ${v}`,
+    panel: "Походы",
+    map: "Карта",
+    view: "Вид",
+    viewList: "Список",
+    viewHike: "Описание",
+    viewMap: "Карта",
+    themeToDark: "Включить тёмную тему",
+    themeToLight: "Включить светлую тему",
+    statHikes: "Походов",
+    statDays: (n) => `${num(n)} ${plural(n, "день", "дня", "дней")} в горах`,
+    statDistance: "Пройдено",
+    statUp: "Набор высоты",
+    statTop: "Высшая точка",
+    search: "Поиск по названию или региону",
+    allYears: "Все годы",
+    allRegions: "Все регионы",
+    allDifficulty: "Любая сложность",
+    found: (n) => `${n} ${plural(n, "поход", "похода", "походов")}`,
+    nothing: "Ничего не найдено. Попробуйте изменить фильтры.",
+    practical: "Практическая информация",
+    srcTrack: "Расчёт по треку",
+    srcTrackPlaces: "Расчёт по треку; названия населённых пунктов — из OpenStreetMap",
+    srcAuthor: "Мои наблюдения",
+    srcOsm: "Из OpenStreetMap, мной не проверено",
+    srcDrive: "Расчёт сервиса маршрутов OSRM по дорогам OpenStreetMap — без учёта пробок и состояния дороги",
+    hints: "Подсказки из OpenStreetMap",
+    hintsIntro: "Что отмечено на карте OpenStreetMap рядом с треком. Сам я эти места не проверял: воды может не быть, а место — выглядеть иначе.",
+    osmLink: "на карте OSM",
+    osmMark: "OSM",
+    driveFrom: (from) => `На машине от: ${from}`,
+    driveTo: "до старта",
+    driveBack: "от финиша обратно",
+    driveLine: (km, time) => `${km} км, около ${time}`,
+    driveGap: (km) => `автодорога заканчивается за ${km} км от этой точки`,
+    allConditions: "Любые условия",
+    conditions: { water: "Есть вода на маршруте", transit: "Можно без машины" },
+    checked: (d) => `Сведения проверены ${d}`,
+    routeType: "Тип маршрута",
+    routeTypes: {
+      loop: "Кольцевой", out_and_back: "Туда и обратно", point_to_point: "Из пункта А в пункт Б",
+      mixed: "Смешанный: кольцо и участок туда и обратно",
+    },
+    routeShort: { loop: "Кольцо", out_and_back: "Туда и обратно", point_to_point: "А → Б", mixed: "Смешанный" },
+    allRouteTypes: "Любой тип маршрута",
+    byAuthor: "уточнено автором",
+    start: "Старт",
+    finish: "Финиш",
+    routeToStart: "Маршрут до старта",
+    daylight: "Световой день",
+    daylightLeft: (d) => `после финиша оставалось ${d} света`,
+    daylightOver: (d) => `финиш через ${d} после захода солнца`,
+    daylightNight: "финиш до восхода солнца",
+    pace: "Темп",
+    speed: (v) => `${v} км/ч в движении`,
+    stops: (d) => `остановки ${d}`,
+    relief: "Рельеф",
+    gainPerKm: (m) => `${m} м набора на километр`,
+    steepUp: (g, km, day) => `самый крутой подъём ${g} % на 500 м (${day ? `${day}, ` : ""}от ${km} км)`,
+    steepDown: (g, km, day) => `самый крутой спуск ${g} % на 500 м (${day ? `${day}, ` : ""}от ${km} км)`,
+    gettingThere: "Как добраться",
+    waysCount: (n) => `${n} ${plural(n, "вариант", "варианта", "вариантов")}`,
+    transport: { car: "На машине", taxi: "Такси", marshrutka: "Маршрутка", bus: "Автобус", train: "Поезд", other: "Другой транспорт" },
+    priceFor: { car: "за машину", person: "с человека" },
+    trip: { one_way: "в одну сторону", round_trip: "туда и обратно" },
+    priceDate: (d) => `цена на ${d}`,
+    boarding: "Посадка",
+    road: "Дорога",
+    water: "Вода",
+    litre: "л",
+    waterYes: "На маршруте есть вода.",
+    waterYesHike: "В походе в целом вода есть; об этом дне отдельных сведений нет.",
+    waterNo: "Воды на маршруте нет.",
+    waterUnknown: "Нет сведений о воде на маршруте.",
+    drunk: (l) => `Выпито ${l}`,
+    perHour: (v) => `${v} л в час на маршруте`,
+    per10km: (v) => `${v} л на 10 км`,
+    taken: "взято",
+    refilled: "пополнено",
+    left: "осталось",
+    sourcesCount: (n) => `${n} ${plural(n, "источник", "источника", "источников")}`,
+    sourceTypes: { spring: "Родник", tap: "Кран", well: "Колодец", stream: "Ручей", other: "Вода" },
+    hadWater: { true: "вода была", false: "воды не было", null: "неизвестно, была ли вода" },
+    seasonal: "пересыхает в сухой сезон",
+    treatYes: "воду нужно обрабатывать",
+    treatNo: "можно пить без обработки",
+    places: "Особые места",
+    placeTypes: {
+      firepit: "Место для костра", shelter: "Беседка или навес", swing: "Качели", camp: "Место для ночёвки",
+      signpost: "Указатель", viewpoint: "Смотровая площадка", table: "Стол и скамейки", toilet: "Туалет",
+      parking: "Парковка", obstacle: "Препятствие", other: "Место",
+    },
+    kmFromStart: (km) => `${km} км от старта`,
+    offTrack: (m) => `в стороне от трека, ${m} м`,
+    seen: (d) => `по состоянию на ${d}`,
+    openPhoto: "Открыть фото",
+    trail: "Тропа и условия",
+    stay: "Ночёвка и после похода",
+    weather: "Погода",
+    srcWeather: "По модели Open-Meteo — это расчёт по сетке, а не замер на тропе",
+    srcRate: (d) => `Доллары — расчёт по курсу Нацбанка Грузии на ${d}`,
+    wRoles: { start: "Старт", top: "Высшая точка", finish: "Финиш" },
+    wFeels: (v) => `ощущается как ${v}`,
+    wWind: (w, g) => `ветер ${w} км/ч${g != null ? `, порывы ${g}` : ""}`,
+    wCloud: (c) => `облачность ${c} %`,
+    wRain: (mm) => `осадки ${mm} мм в час`,
+    wSnow: (cm) => `снег ${cm} см в час`,
+    wSpan: "За время похода",
+    wTemps: (a, b) => (a === b ? a : `от ${a} до ${b}`),
+    wRainUpTo: (mm) => `осадки до ${mm} мм`,
+    wDry: "без осадков",
+    wSnowUpTo: (cm) => `снег до ${cm} см`,
+    wWindUpTo: (w, g) => `ветер до ${w} км/ч${g != null ? `, порывы до ${g}` : ""}`,
+    wmo: {
+      clear: "ясно", partly: "переменная облачность", cloudy: "пасмурно", fog: "туман", drizzle: "морось",
+      rain: "дождь", snow: "снег", showers: "ливень", storm: "гроза",
+    },
+    noteLabels: {
+      parking: "Парковка", surface: "Покрытие", marking: "Маркировка и навигация", obstacles: "Препятствия",
+      signal: "Мобильная связь", dangers: "Опасности", gear: "Снаряжение", season: "Сезон", overnight: "Ночёвка",
+      after: "После похода", suitable: "Кому подходит",
+    },
+    reset: "Сбросить фильтры",
+    showOnMap: "Показать найденные на карте",
+    sort: "Сортировка",
+    sorts: {
+      new: "Сначала новые", old: "Сначала старые", short: "Самые короткие", long: "Самые длинные",
+      up: "Наибольший набор высоты", low: "Наименьший набор высоты",
+    },
+    allDistances: "Любое расстояние",
+    distances: { short: "До 10 км", mid: "10–20 км", long: "Больше 20 км" },
+    allDayCounts: "Любая длительность",
+    dayCounts: { one: "1 день", multi: "2 дня и больше" },
+    back: "Все походы",
+    distance: "Расстояние",
+    up: "Набор",
+    down: "Спуск",
+    duration: "Время",
+    moving: "В движении",
+    maxAlt: "Макс. высота",
+    days: (n) => `${n} ${plural(n, "день", "дня", "дней")}`,
+    day: (i) => `День ${i}`,
+    allDays: "Все дни",
+    profile: "Профиль высоты",
+    impressions: "Впечатления",
+    noImpressions: "Впечатления ещё не написаны.",
+    videos: "Видео",
+    photos: "Фото",
+    links: "Ссылки",
+    komoot: "Трек в Komoot",
+    youtube: "Смотреть на YouTube",
+    play: "Воспроизвести видео",
+    noTrack: "Трек для этого похода не записан.",
+    downloadGpx: "Скачать GPX",
+    share: "Поделиться",
+    linkCopied: "Ссылка скопирована",
+    copyLink: "Скопируйте ссылку на поход:",
+    trackError: "Не удалось загрузить трек. Обновите страницу позже.",
+    km: "км",
+    m: "м",
+    h: "ч",
+    min: "мин",
+    layers: { topo: "Топокарта", sat: "Спутник", plain: "Схема" },
+    terrain3d: "3D-рельеф",
+    difficulty: { easy: "Легко", medium: "Средне", hard: "Тяжело", expert: "Очень тяжело" },
     altAt: (alt, km) => [`${alt} м`, `${km} км`],
   },
   en: {
@@ -348,8 +521,14 @@ const STRINGS = {
 
 const MONTHS_BE = ["студзеня", "лютага", "сакавіка", "красавіка", "траўня", "чэрвеня", "ліпеня", "жніўня",
   "верасня", "кастрычніка", "лістапада", "снежня"];
+const MONTHS_RU = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
+  "октября", "ноября", "декабря"];
 const MONTHS_EN = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
   "October", "November", "December"];
+const MONTHS = { be: MONTHS_BE, ru: MONTHS_RU, en: MONTHS_EN };
+// Калі тэксту на мове інтэрфейсу няма: беларускі і рускі чытач разумеюць мовы адзін аднаго лепш, чым англійскую.
+const FALLBACK = { be: ["be", "ru", "en"], ru: ["ru", "be", "en"], en: ["en", "be", "ru"] };
+const NUMBER_LOCALE = { be: ["be", "ru"], ru: "ru", en: "en" };
 
 function plural(n, one, few, many) {
   const n10 = n % 10, n100 = n % 100;
@@ -359,20 +538,26 @@ function plural(n, one, few, many) {
 }
 
 export let lang = "be";
-export function setLang(l) { lang = l === "en" ? "en" : "be"; }
+export function setLang(l) { lang = LANGS.includes(l) ? l : "be"; }
 export function t(key, ...args) {
   const v = STRINGS[lang][key];
   return typeof v === "function" ? v(...args) : v;
 }
 
-/** Тэкст з даных: {be, en} → патрэбная мова з запасным варыянтам. */
+/** Тэкст з даных: {be, en, ru?} → патрэбная мова з запасным варыянтам. */
 export function pick(pair) {
   if (!pair) return "";
-  return pair[lang] || pair.be || pair.en || "";
+  for (const l of FALLBACK[lang]) if (pair[l]) return pair[l];
+  return "";
+}
+
+/** Ці ёсць у пары тэкст хоць на адной мове. */
+export function hasText(pair) {
+  return Boolean(pair && LANGS.some((l) => pair[l]));
 }
 
 export function num(n, digits = 0) {
-  return new Intl.NumberFormat(lang === "be" ? ["be", "ru"] : "en", {
+  return new Intl.NumberFormat(NUMBER_LOCALE[lang], {
     maximumFractionDigits: digits, minimumFractionDigits: 0,
   }).format(n);
 }
@@ -384,7 +569,7 @@ function parseDate(iso) {
 
 export function dateRange(startIso, endIso) {
   const s = parseDate(startIso), e = parseDate(endIso || startIso);
-  const months = lang === "be" ? MONTHS_BE : MONTHS_EN;
+  const months = MONTHS[lang];
   const same = s.y === e.y && s.m === e.m && s.d === e.d;
   if (same) return `${s.d} ${months[s.m]} ${s.y}`;
   if (s.y === e.y && s.m === e.m) return `${s.d}–${e.d} ${months[s.m]} ${s.y}`;
@@ -394,13 +579,17 @@ export function dateRange(startIso, endIso) {
 
 export function shortDate(iso) {
   const d = parseDate(iso);
-  const months = lang === "be" ? MONTHS_BE : MONTHS_EN;
+  const months = MONTHS[lang];
   return `${d.d} ${months[d.m]}`;
 }
 
-export function duration(sec) {
+/** Працягласць часткамі [лік, адзінка]: гадзіны (калі ёсць) і хвіліны. */
+export function durationParts(sec) {
   const total = Math.round(sec / 60);
   const h = Math.floor(total / 60), m = total % 60;
-  if (!h) return `${m} ${t("min")}`;
-  return `${h} ${t("h")} ${String(m).padStart(2, "0")} ${t("min")}`;
+  return h ? [[String(h), t("h")], [String(m).padStart(2, "0"), t("min")]] : [[String(m), t("min")]];
+}
+
+export function duration(sec) {
+  return durationParts(sec).map(([value, unit]) => `${value} ${unit}`).join(" ");
 }

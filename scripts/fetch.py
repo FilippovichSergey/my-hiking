@@ -199,8 +199,8 @@ def main(argv=None) -> None:
         for day in days:
             pts = practical._points(day)
             for key, (lat, lng) in {geo.names_key(p[0], p[1]): (p[0], p[1]) for p in (pts[0], pts[-1])}.items():
-                if key in read_json(geo.GEOCODE_CACHE, {}):
-                    continue
+                if "ru" in (read_json(geo.GEOCODE_CACHE, {}).get(key) or {}):
+                    continue  # назва ўжо ёсць на ўсіх мовах сайта
                 if geo.place_names(lat, lng) is None:
                     failed += 1
                 else:
