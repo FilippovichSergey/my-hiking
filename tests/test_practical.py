@@ -1866,5 +1866,87 @@ class TestReview172(FetchProject):
         self.assertEqual({w["to"]["be"] for w in got}, {"Мілісі"}, "астатнія палі запісу на месцы")
 
 
+class TestPhotoPlaces(PracticalProject):
+    """Месцы здымкі фота для значкоў на карце: па GPS фота каля трэку або па часе здымкі на трэку."""
+
+    FOLDER = "20250601_Паход"
+
+    def hike(self, extra=""):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))  # 08:00–12:00 мясцовага часу, квадрат 4 км
+        (self.content / "h.yaml").write_text(
+            f"date: 2025-06-01\ntitle: {{be: H}}\nkomoot: [1]\nphotos_folder: {self.FOLDER}\n{extra}", encoding="utf-8")
+
+    def test_places_by_shooting_time_and_gps(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        days = practical.raw_days([1], 4)
+        gps = lambda north, east: [round(42.0 + east * M / 0.7547, 5), round(41.0 + north * M, 5)]  # [даўгата, шырата]  # noqa: E731
+        entry = lambda name, original=None, at=None: (f"{name}.jpg", {"name": name, "original": original, "gps": at})  # noqa: E731
+        manifest = dict([
+            entry("time", "2025-06-01T09:00:00"),                      # гадзіна ад старту — 1 км
+            entry("gps", "2025-06-01T09:00:00", gps(500, 1050)),       # GPS за 50 м ад трэку каля 2,5 км: дакладнейшы за час
+            entry("far", "2025-06-01T10:00:00", gps(9000, 9000)),      # GPS далёка ад трэку (стары адбітак) — месца па часе
+            entry("camp", None, gps(-40, 0)),                          # без часу, GPS каля старту
+            entry("home", None, gps(50000, 0)),                        # без часу, GPS далёка — не на маршруце
+            entry("early", "2025-06-01T06:00:00"),                     # за дзве гадзіны да старту
+            entry("eve", "2025-05-31T19:00:00"),                       # вечар напярэдадні
+            entry("month", "2025-07-01T09:00:00"),                     # у камеры не той месяц
+            entry("plain"),                                            # ні часу, ні GPS
+            entry("bad", "учора", [200, 95]),                          # няправільныя значэнні
+        ])
+        photos = [{"src": f"photos/h/{m['name']}.webp", "thumb": f"photos/h/{m['name']}-t.webp", "w": 4, "h": 3} for m in manifest.values()]
+        places = dict(zip((m["name"] for m in manifest.values()), practical.photo_places(photos, manifest, days)))
+        self.assertEqual(places["time"], {"day": 0, "km": 1.0, "at": [42.0, round(41.0 + 1000 * M, 5)], "alt": 1200, "time": "09:00"})
+        self.assertEqual(places["gps"], {"day": 0, "km": 2.5, "at": gps(500, 1050), "alt": 1300, "time": "09:00", "off": 50},
+                         "месца — сам пункт GPS, кіламетр — бліжэйшага месца трэку, час — час здымкі")
+        self.assertEqual((places["far"]["km"], places["far"]["time"], "off" in places["far"]), (2.0, "10:00", False))
+        self.assertEqual(places["camp"], {"day": 0, "km": 0.0, "at": gps(-40, 0), "alt": 1000, "off": 40}, "без часу здымкі — без часу")
+        self.assertEqual([places[name] for name in ("home", "early", "eve", "month", "plain", "bad")], [None] * 6,
+                         "месца не выдумляецца")
+        self.assertEqual(practical.photo_places(photos, manifest, []), [None] * len(photos), "без трэку месцаў няма")
+        self.assertEqual(practical.photo_places(photos, {}, days), [None] * len(photos), "без маніфеста — таксама")
+
+        # шматдзённы паход «туды і назад»: дзень бярэцца з часу здымкі, а не з бліжэйшага па GPS дня
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (3000, 0)))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path((3000, 0), (0, 0)))
+        two = practical.raw_days([1, 2], 4)
+        back = {"b.jpg": {"name": "b", "original": "2025-06-02T09:00:00", "gps": gps(2200, 20)}}
+        pos = practical.photo_places([{"src": "photos/h/b.webp", "thumb": "photos/h/b-t.webp"}], back, two)[0]
+        self.assertEqual((pos["day"], pos["km"], pos["time"]), (1, 0.8, "09:00"))
+
+    def test_build_publishes_photo_places_and_keeps_them_with_the_track(self):
+        self.hike()
+        for name, taken in (("A.jpg", "2025:06:01 09:00:00"), ("B.jpg", "2025:06:01 11:00:00"), ("Eve.jpg", "2025:05:31 19:00:00")):
+            self.photo(self.FOLDER, name, taken)
+        index, out = self.build()
+        photos = index["h"]["photos"]
+        self.assertEqual([Path(p["src"]).stem.split("-")[0] for p in photos], ["eve", "a", "b"], "парадак галерэі — па часе")
+        self.assertEqual([p.get("pos") and (p["pos"]["km"], p["pos"]["time"]) for p in photos], [None, (1.0, "09:00"), (3.0, "11:00")])
+        self.assertEqual(set(photos[1]), {"src", "thumb", "w", "h", "pos"})
+        self.assertEqual(set(photos[0]), {"src", "thumb", "w", "h"}, "фота без месца — без поля pos")
+        placed = [p.get("pos") for p in photos]
+
+        # дыск з фота недаступны: месцы лічацца з маніфеста, як і раней
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.assertEqual([p.get("pos") for p in self.build()[0]["h"]["photos"]], placed)
+        # тура няма ў кэшы: на сайце застаецца ранейшы трэк, а з ім і месцы фота
+        tour = build.CACHE / "komoot" / "tours" / "1.json"
+        saved = tour.read_text(encoding="utf-8")
+        tour.unlink()
+        for attempt in (1, 2):
+            self.assertEqual([p.get("pos") for p in self.build()[0]["h"]["photos"]], placed, attempt)
+        tour.write_text(saved, encoding="utf-8")
+        self.cfg = {**self.cfg, "photos_root": str(self.photos_root)}
+
+        # трэк змяніўся: месцы пералічваюцца (старт на гадзіну пазней — фота А цяпер на самым старце)
+        self.add_tour(1, "2025-06-01T05:00:00Z", path(*SQUARE))
+        self.assertEqual([p.get("pos") and p["pos"]["km"] for p in self.build()[0]["h"]["photos"]], [None, 0.0, 2.0])
+        # трэку ў паходу больш няма: фота застаюцца ў галерэі, але без месцаў
+        (self.content / "h.yaml").write_text(
+            f"date: 2025-06-01\ntitle: {{be: H}}\nkomoot: []\nlocation: [41, 42]\nphotos_folder: {self.FOLDER}\n", encoding="utf-8")
+        for attempt in (1, 2):
+            photos = self.build()[0]["h"]["photos"]
+            self.assertEqual((len(photos), [p.get("pos") for p in photos]), (3, [None, None, None]), attempt)
+
+
 if __name__ == "__main__":
     unittest.main()

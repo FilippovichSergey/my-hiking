@@ -58,3 +58,16 @@ export function hikePois(hike, day) {
     title: poiTitle(kind, it), where: poiWhere(it.pos, hike), source: t(hint ? "srcOsm" : "srcAuthor"),
   }));
 }
+
+/**
+ * Фота паходу, для якіх вядома месца здымкі (pos у індэксе: па GPS фота або па часе здымкі на трэку);
+ * day — выбраны дзень або null. Фота: { index — нумар у галерэі, at: [lng, lat], thumb, w, h, title, where }.
+ */
+export function hikePhotos(hike, day) {
+  return hike.photos.map((photo, index) => ({ photo, index }))
+    .filter(({ photo }) => photo.pos && (day == null || photo.pos.day === day))
+    .map(({ photo, index }) => ({
+      index, at: photo.pos.at, thumb: photo.thumb, w: photo.w, h: photo.h,
+      title: t("photoAlt", pick(hike.title), index + 1), where: poiWhere(photo.pos, hike),
+    }));
+}

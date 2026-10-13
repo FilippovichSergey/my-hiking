@@ -4,7 +4,7 @@ import { gpxText } from "./gpx.js";
 import { renderPractical } from "./practical.js";
 import { dateRange, durationParts, lang, LANGS, num, pick, setLang, shortDate, t } from "./i18n.js";
 import { createMap } from "./map.js";
-import { hikePois } from "./pois.js";
+import { hikePhotos, hikePois } from "./pois.js";
 import { renderProfile } from "./profile.js";
 
 const PSWP_URL = "https://cdn.jsdelivr.net/npm/photoswipe@5.4.4/dist/photoswipe.esm.min.js";
@@ -479,6 +479,8 @@ async function renderDetail(hike, fit = true) {
   // Крыніцы вады і месцы — на карце і на профілі вышыні; падказкі OpenStreetMap пазначаныя асобна.
   const pois = hikePois(hike, day);
   map.setPois?.(pois); // у кэшы браўзера яшчэ можа быць ранейшы map.js
+  // Значкі фота — там, дзе зроблены здымкі; націск на фота ў акенцы адкрывае галерэю.
+  map.setPhotos?.(hikePhotos(hike, day), (index) => openGallery(hike, index));
 
   const profEl = document.getElementById("profile");
   if (profEl && track) {

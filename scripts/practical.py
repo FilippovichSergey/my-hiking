@@ -604,6 +604,46 @@ def _at_km(day: dict, km: float) -> tuple:
     return min(_points(day), key=lambda p: abs(p[4] - km))
 
 
+PHOTO_GPS_M = 300  # GPS фота далей за гэта ад трэку — не месца на маршруце (стары або памылковы адбітак, фота з дому)
+
+
+def photo_places(photos: list, manifest: dict, days: list[dict]) -> list:
+    """Месца здымкі кожнага апублікаванага фота (у тым жа парадку) або None, калі яно невядомае.
+
+    Калі ў фота ёсць GPS каля трэку, месца — сам пункт GPS (кіламетр і вышыня — ад бліжэйшага месца трэку).
+    Інакш — месца на трэку ў момант здымкі паводле часу з EXIF. Фота без часу і GPS, зробленыя да старту,
+    пасля фінішу або з няправільнай датай у камеры застаюцца без месца: яно не выдумляецца.
+    """
+    by_name = {m.get("name"): m for m in manifest.values() if isinstance(m, dict)}
+    return [_photo_place(by_name.get(photo_name(p)) or {}, days) for p in photos]
+
+
+def _photo_place(entry: dict, days: list[dict]) -> dict | None:
+    if not days:
+        return None
+    tz, ts = days[0]["tz"], None
+    if entry.get("original"):  # час арыгінальнага здымка, а не дата змены файла
+        try:
+            ts = datetime.fromisoformat(entry["original"]).replace(tzinfo=tz).timestamp()
+        except (TypeError, ValueError):
+            ts = None
+    pos = by_time = _by_time(days, ts) if ts is not None else None
+    gps = entry.get("gps")  # [даўгата, шырата]
+    point = lat_lng([gps[1], gps[0]]) if isinstance(gps, (list, tuple)) and len(gps) == 2 else None
+    if point:
+        # дзень вядомы з часу здымкі: на маршруце «туды і назад» пункт GPS блізкі да трэку двойчы
+        found = _project(point[0], point[1], days, by_time["day"] if by_time else None)
+        if found and found[0] <= PHOTO_GPS_M:
+            pos = _position(days, found[1], found[2], found[0])
+            pos["at"] = [round(point[1], 5), round(point[0], 5)]
+    if pos is None:
+        return None
+    pos["time"] = _clock(ts, tz)  # час здымкі; без яго — без часу (час праходу трэку побач — не час фота)
+    if pos["time"] is None:
+        del pos["time"]
+    return pos
+
+
 def _position(days: list[dict], di: int, point: tuple, off: float | None = None) -> dict:
     pos = {"day": di, "km": round(point[4], 1), "at": [round(point[1], 5), round(point[0], 5)],
            "alt": round(point[2]) if point[2] is not None else None, "time": _clock(point[3], days[di]["tz"])}

@@ -646,6 +646,17 @@ def main(argv=None) -> None:
             photos, cover_idx, photo_gps = build_photos(slug, src_dir, h.get("cover"), cfg, args.force, pending,
                                                         prev)
 
+        # Месца здымкі кожнага фота — для значкоў на карце. Яно лічыцца па трэку; калі тура няма ў кэшы
+        # і на сайце застаецца ранейшы трэк — застаюцца і ранейшыя месцы; без трэку месцаў няма.
+        if raw:
+            places = practical.photo_places(photos, read_manifest(slug), raw)
+        elif kept_track:
+            was = {photo_name(p): p.get("pos") for p in (prev or {}).get("photos") or []}
+            places = [was.get(photo_name(p)) for p in photos]
+        else:
+            places = [None] * len(photos)
+        photos = [{**{k: v for k, v in p.items() if k != "pos"}, **({"pos": pos} if pos else {})} for p, pos in zip(photos, places)]
+
         point, bbox = None, None
         if lines:
             all_pts = [p for line in lines for p in line]

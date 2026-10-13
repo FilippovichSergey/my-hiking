@@ -398,6 +398,33 @@ button.poi:hover, button.poi:focus-visible { z-index: 2; background: var(--surfa
 #map .poi-hint { background: rgba(255, 255, 255, 0.85); box-shadow: none; }
 #map button.poi:hover, #map button.poi:focus-visible { background: #fff; }
 .popup-source { margin-top: 2px; font-size: 11px; color: var(--muted); }
+
+/* ---- Фота на карце: значок там, дзе зроблены здымак ---------------------- */
+.photo-pin {
+  display: grid; place-items: center;
+  width: 26px; height: 26px; padding: 0;
+  border: 2px solid #fff; border-radius: 50%;
+  background: #1f2937; color: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  font: 700 12px/1 var(--font);
+  cursor: pointer;
+}
+.photo-pin svg { width: 15px; height: 15px; fill: currentColor; }
+.photo-pin-many { background: #111827; min-width: 26px; }
+.photo-pin:hover, .photo-pin:focus-visible { background: #c2410c; z-index: 3; }
+.photo-pop { display: grid; gap: 6px; justify-items: center; padding-top: 4px; }
+.photo-pop-img { display: block; padding: 0; border: 0; border-radius: 6px; overflow: hidden; background: var(--surface-3); cursor: zoom-in; }
+.photo-pop-img img { display: block; max-width: 100%; height: auto; }
+.photo-pop-nav { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-2); }
+.photo-pop-nav button {
+  width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--surface); color: var(--text);
+  font-size: 18px; line-height: 1; cursor: pointer;
+}
+.photo-pop-nav button:hover { background: var(--surface-2); }
+.photo-pop .popup-meta { justify-self: start; }
+.maplibregl-popup-close-button { color: var(--text-2); font-size: 18px; padding: 0 6px; }
 .tooltip {
   position: absolute; top: 0;
   pointer-events: none;

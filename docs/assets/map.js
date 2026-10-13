@@ -1,5 +1,5 @@
 // Карта MapLibre: падкладкі (тапа / спадарожнік / схема), 3D-рэльеф, маркеры і трэкі паходаў.
-import { cssVar, h } from "./dom.js";
+import { cssVar, h, s } from "./dom.js";
 import { dateRange, pick, t } from "./i18n.js";
 import { poiIcon } from "./pois.js";
 
@@ -35,6 +35,9 @@ const EMPTY = { type: "FeatureCollection", features: [] };
 const HIKE_COLOR = "#7c3aed";
 const CLUSTER_COLOR = "#5b21b6";
 const HINTS_MIN_ZOOM = 11; // падказкі OpenStreetMap паказваюцца, калі карта наблізіцца (іх бывае шмат)
+const PHOTO_MERGE_PX = 30; // значкі фота бліжэй за гэта на экране зліваюцца ў адзін з лічбай
+const PHOTO_BOX = [232, 190]; // найбольшыя шырыня і вышыня фота ў акенцы на карце
+const CAMERA_ICON = "M4 8h3.2l1.4-2h6.8l1.4 2H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zM12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z";
 
 function fitPadding() {
   return innerWidth > 760 ? { top: 50, bottom: 50, left: 50, right: 150 } : 36;
@@ -263,6 +266,67 @@ export function createMap(el, { onSelect, popupExtra }) {
     farHints();
   }
 
+  // --- Фота выбранага паходу: значкі там, дзе зроблены здымкі ---
+  // Значкі, якія на экране накладаюцца, зліваюцца ў адзін з лічбай; пры набліжэнні карты яны разыходзяцца.
+  // Націск паказвае акенца з фота (для некалькіх — са стрэлкамі), націск на фота адкрывае галерэю.
+  let photoItems = [], openPhoto = null, photoMarkers = [], photoLayout = null;
+  const photoPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, offset: 16, maxWidth: "272px" });
+
+  function photoGroups() {
+    const groups = [];
+    for (const item of photoItems) {
+      const { x, y } = map.project(item.at);
+      const near = groups.find((g) => Math.hypot(g.x - x, g.y - y) <= PHOTO_MERGE_PX);
+      if (near) near.items.push(item);
+      else groups.push({ x, y, at: item.at, items: [item] });
+    }
+    return groups;
+  }
+
+  function showPhoto(group, i) {
+    const item = group.items[i], count = group.items.length;
+    const scale = Math.min(PHOTO_BOX[0] / item.w, PHOTO_BOX[1] / item.h);
+    const step = (by) => showPhoto(group, (i + by + count) % count);
+    const arrow = (by, label, sign) => h("button", { type: "button", "aria-label": label, onclick: () => step(by) }, sign);
+    photoPopup.setLngLat(group.at).setDOMContent(h("div", { class: "photo-pop" },
+      h("button", {
+        type: "button", class: "photo-pop-img", "aria-label": t("openPhoto"), title: t("openPhoto"),
+        onclick: () => { photoPopup.remove(); openPhoto?.(item.index); },
+      }, h("img", { src: item.thumb, alt: item.title, width: Math.round(item.w * scale), height: Math.round(item.h * scale) })),
+      count > 1 ? h("div", { class: "photo-pop-nav" },
+        arrow(-1, t("photoPrev"), "‹"), h("span", null, t("photoOf", i + 1, count)), arrow(1, t("photoNext"), "›")) : null,
+      h("div", { class: "popup-meta" }, item.where))).addTo(map);
+  }
+
+  function drawPhotos() {
+    const groups = photoGroups();
+    const layout = groups.map((g) => g.items.map((item) => item.index).join(",")).join("|");
+    if (layout === photoLayout) return; // склад значкоў не змяніўся — адкрытае акенца застаецца
+    photoLayout = layout;
+    photoPopup.remove();
+    photoMarkers.forEach((m) => m.remove());
+    photoMarkers = groups.map((group) => {
+      const many = group.items.length > 1;
+      const pin = h("button", {
+        type: "button", class: `photo-pin${many ? " photo-pin-many" : ""}`,
+        "aria-label": many ? t("photosHere", group.items.length) : t("photoHere", group.items[0].index + 1),
+        onclick: (e) => { e.stopPropagation(); showPhoto(group, 0); },
+      }, many ? String(group.items.length)
+        : s("svg", { viewBox: "0 0 24 24", "aria-hidden": "true" }, s("path", { d: CAMERA_ICON, "fill-rule": "evenodd" })));
+      return new maplibregl.Marker({ element: pin }).setLngLat(group.at).addTo(map);
+    });
+  }
+
+  /** items — гл. hikePhotos; onOpen(index) адкрывае фота ў галерэі. */
+  function setPhotos(items, onOpen) {
+    photoItems = items;
+    openPhoto = onOpen;
+    photoLayout = null;
+    drawPhotos();
+  }
+  map.on("zoomend", drawPhotos);
+  map.on("pitchend", drawPhotos);
+
   function highlight(slug) {
     if (hoveredSlug) map.setFeatureState({ source: "lines", id: hoveredSlug }, { hover: false });
     hoveredSlug = slug;
@@ -346,10 +410,14 @@ export function createMap(el, { onSelect, popupExtra }) {
       map.getSource("selected").setData(EMPTY);
       map.getSource("hover").setData(EMPTY);
       setPois([]);
+      setPhotos([], null);
     },
 
     /** Кропкі выбранага паходу (гл. hikePois): запісы аўтара і бляднейшыя падказкі OpenStreetMap. */
     setPois,
+
+    /** Месцы здымкі фота выбранага паходу (гл. hikePhotos). */
+    setPhotos,
 
     setHoverPoint(p, color) {
       map.getSource("hover").setData(p ? {
@@ -372,7 +440,7 @@ export function createMap(el, { onSelect, popupExtra }) {
   // (Не чакаем падзеі load — яна прыходзіць толькі пасля ўсіх плітак, а OpenTopoMap бывае павольны.)
   let ready = false;
   const queue = [];
-  for (const name of ["setHikes", "fitHikes", "select", "clearSelection", "setPois", "setHoverPoint", "highlight", "refreshTheme"]) {
+  for (const name of ["setHikes", "fitHikes", "select", "clearSelection", "setPois", "setPhotos", "setHoverPoint", "highlight", "refreshTheme"]) {
     const fn = api[name];
     api[name] = (...args) => (ready ? fn.apply(api, args) : queue.push(() => fn.apply(api, args)));
   }

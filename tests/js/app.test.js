@@ -5,59 +5,11 @@ import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { JSDOM } from "jsdom";
 
+import { FakeMap, maplibregl } from "./fakes.js";
+
 const ROOT = new URL("../../", import.meta.url);
 
-// --- Падмены ------------------------------------------------------------------
-
-class FakeSource {
-  constructor(id) { this.id = id; this.data = null; }
-  setData(data) { this.data = data; }
-  setTiles() {}
-  getClusterExpansionZoom() { return Promise.resolve(10); }
-}
-
-class FakeMap {
-  static last = null;
-  constructor(opts) {
-    FakeMap.last = this;
-    this.handlers = {};
-    this.layout = {}; // уласцівасці слаёў, зададзеныя праз setLayoutProperty: { слой: { уласцівасць: значэнне } }
-    this.sources = Object.fromEntries(Object.keys(opts.style.sources).map((id) => [id, new FakeSource(id)]));
-    setTimeout(() => this.fire("styledata"), 0);
-  }
-  on(type, layerOrFn, fn) { (this.handlers[type] ||= []).push(fn || layerOrFn); }
-  off(type, fn) { this.handlers[type] = (this.handlers[type] || []).filter((f) => f !== fn); }
-  fire(type) { for (const f of [...(this.handlers[type] || [])]) f({}); }
-  getSource(id) { return this.sources[id]; }
-  getCanvas() { return { style: {} }; }
-  getBearing() { return 0; }
-  getZoom() { return this.zoom ?? 12; }
-  addControl() {} setPaintProperty() {} setFeatureState() {}
-  setLayoutProperty(id, prop, value) { (this.layout[id] ||= {})[prop] = value; }
-  fitBounds(...args) { (this.fits ||= []).push(args); }
-  flyTo() {} easeTo() {} resize() {} setTerrain() {} setSky() {}
-}
-
-const maplibregl = {
-  Map: FakeMap,
-  NavigationControl: class {},
-  ScaleControl: class {},
-  Popup: class {
-    static content = null; // змесціва апошняй паказанай падказкі
-    setLngLat() { return this; }
-    setDOMContent(node) { maplibregl.Popup.content = node; return this; }
-    addTo() { return this; }
-    remove() {}
-  },
-  Marker: class {
-    static all = []; // кропкі (крыніцы вады і месцы), якія цяпер стаяць на карце
-    constructor({ element }) { this.element = element; }
-    setLngLat(at) { this.at = at; return this; }
-    addTo() { maplibregl.Marker.all.push(this); return this; }
-    remove() { maplibregl.Marker.all = maplibregl.Marker.all.filter((m) => m !== this); }
-  },
-  LngLatBounds: class { extend() { return this; } },
-};
+// --- Падмены: MapLibre — у fakes.js ------------------------------------------
 
 const day = (date, km) => ({ date, name: "t", distance: km, up: 100, down: 100, duration: 3600, moving: 3000,
   maxAlt: 2000, minAlt: 1000, komoot: [] });
@@ -783,5 +735,37 @@ test("рэгіён з назвай толькі па-руску ёсць у фі
     [slow.region, broken.region] = saved;
     document.querySelector('[data-lang="be"]').click();
     await tick(60);
+  }
+});
+
+test("значкі фота на карце адкрытага паходу", async () => {
+  const guria = DATA.hikes.find((hk) => hk.slug === "guria");
+  const photo = (name, pos) => ({ src: `photos/guria/${name}.webp`, thumb: `photos/guria/${name}-t.webp`, w: 2000, h: 1500, ...(pos ? { pos } : {}) });
+  guria.photos = [
+    photo("a", { day: 0, km: 1.2, at: [42.0, 41.0], alt: 950, time: "09:10" }),
+    photo("b"), // месца невядомае: на карце яго няма
+    photo("c", { day: 0, km: 3.4, at: [42.2, 41.2], alt: 990, time: "11:40", off: 60 }),
+  ];
+  const pins = () => maplibregl.Marker.all.filter((m) => m.element.classList.contains("photo-pin"));
+  try {
+    await go("#/be/guria");
+    await waitFor(() => pins().length === 2, "значкі фота");
+    assert.deepEqual(pins().map((m) => [m.at, m.element.getAttribute("aria-label")]),
+      [[[42.0, 41.0], "Фота 1: паказаць, дзе зроблена"], [[42.2, 41.2], "Фота 3: паказаць, дзе зроблена"]]);
+    pins()[1].element.click();
+    const pop = maplibregl.Popup.content;
+    assert.equal(pop.querySelector("img").getAttribute("src"), "photos/guria/c-t.webp");
+    assert.equal(pop.querySelector("img").getAttribute("alt"), "guria · фота 3");
+    assert.equal(pop.querySelector(".popup-meta").textContent, "3,4 км ад старту · 990 м · 11:40 · збоку ад трэку, 60 м");
+    assert.equal(pop.querySelector(".photo-pop-nav"), null, "адно фота — без стрэлак");
+    assert.equal(panel().querySelectorAll(".gallery a").length, 3, "у галерэі на старонцы — усе фота");
+
+    await go("#/en/guria");
+    await waitFor(() => pins()[0]?.element.getAttribute("aria-label") === "Photo 1: show where it was taken", "значкі па-англійску");
+    assert.equal(pins().length, 2, "значкі не падвойваюцца пры перамалёўцы");
+    await go("#/be");
+    assert.equal(pins().length, 0, "у спісе паходаў значкоў фота няма");
+  } finally {
+    guria.photos = [];
   }
 });
