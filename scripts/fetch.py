@@ -5,6 +5,7 @@
   крыніцы вады і месцы каля трэку — OpenStreetMap (Overpass) → cache/osm/<паход>.json
   дарога на машыне ад home з config.yaml — OSRM            → cache/routes.json
   населеныя пункты старту і фінішу — Nominatim             → cache/geocode.json
+  звычайнае надвор'е па месяцах — архіў Open-Meteo, 5 гадоў  → cache/climate/<квадрат>.json
 
 Запуск:  hike fetch            (толькі тое, чаго яшчэ няма)
          hike fetch --refresh  (перакачаць усё нанова)
@@ -34,6 +35,8 @@ API_ROUTE = "https://router.project-osrm.org/route/v1/driving/"
 ROAD_GAP_M = 300  # аўтадарога сканчаецца далей за гэта ад пункта трэку — пра гэта кажацца на сайце
 OSM_BATCH = 8            # паходаў у адным запыце да Overpass: сервер абмяжоўвае частату запытаў
 OSM_RETRY_S = (20, 60)   # паўзы перад паўторам, калі сервер заняты
+CLIMATE_PAUSE_S = 15     # паміж запытамі звычайнага надвор'я: пяць гадоў даных Open-Meteo лічыць за ~130 запытаў,
+                         # а бясплатна можна 600 за хвіліну і 5000 за гадзіну
 ERRORS = (requests.RequestException, RuntimeError, ValueError, KeyError, IndexError, TypeError)
 
 
@@ -63,6 +66,24 @@ def fetch_day_weather(session: requests.Session, points: list[dict]) -> dict:
     if len(series) != len(points):
         raise RuntimeError("нечаканы адказ сэрвісу надвор'я")
     return practical.summarize_weather(points, series)
+
+
+def fetch_climate(session: requests.Session, lat: float, lng: float) -> dict:
+    """Дзённыя тэмпература і ападкі за CLIMATE_YEARS у квадраце сеткі — для звычайнага надвор'я па месяцах."""
+    first, last = practical.CLIMATE_YEARS
+    data = get_json(session, API_WEATHER, {
+        "latitude": round(lat, 1), "longitude": round(lng, 1), "start_date": f"{first}-01-01", "end_date": f"{last}-12-31",
+        "daily": ",".join(practical.CLIMATE_DAILY), "timezone": "GMT", "models": practical.CLIMATE_MODEL,
+    })
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(data.get("reason") or "сэрвіс вярнуў памылку")
+    found = {"source": "Open-Meteo Historical Weather API, ERA5-Seamless (ERA5-Land, ERA5)", "model": practical.CLIMATE_MODEL,
+             "years": list(practical.CLIMATE_YEARS), "latitude": data.get("latitude"), "longitude": data.get("longitude"),
+             "elevation": data.get("elevation"),
+             "daily": {k: (data.get("daily") or {}).get(k) for k in ("time", *practical.CLIMATE_DAILY)}}
+    if not practical.climate_ok(found):  # іншыя даты, не тыя рады, няма вышыні
+        raise RuntimeError("нечаканы адказ сэрвісу надвор'я")
+    return found  # асобных значэнняў можа не быць: гл. practical.climate_full
 
 
 def fetch_rate(session: requests.Session, day: str) -> float | None:
@@ -131,7 +152,7 @@ def needs(slug: str, h: dict, days: list[dict], start: str | None, home, routes:
 
     weather: [(дата, пункты, ключ, ёсць)] — дні з часам у трэку; ёсць — калі звесткі для гэтага трэку поўныя;
     osm: (вобласць, ёсць) або None; routes: [(to | back, пункт, ключ, ёсць)]; names: [(ключ, шырата, даўгата, ёсць)];
-    rates: [(дата, ёсць)].
+    rates: [(дата, ёсць)]; climate: [(квадрат, шырата, даўгата, ёсць)] — звычайнае надвор'е ў найвышэйшым пункце.
     """
     cached = read_json(CACHE / "weather" / f"{slug}.json", {}).get("days") or {}
     weather = []
@@ -150,8 +171,15 @@ def needs(slug: str, h: dict, days: list[dict], start: str | None, home, routes:
     known = read_json(geo.GEOCODE_CACHE, {})
     spots = {geo.names_key(p[0], p[1]): (p[0], p[1]) for day in days for p in (practical._points(day)[0], practical._points(day)[-1])}
     names = [(key, lat, lng, "ru" in (known.get(key) or {})) for key, (lat, lng) in spots.items()]  # ёсць на ўсіх мовах сайта
+    top = practical.climate_point(days)
+    climate = []
+    if top:
+        cell = practical.climate_key(top[0], top[1])
+        cached = read_json(CACHE / "climate" / f"{cell}.json")
+        # ёсць — калі спампавана ўсё; `retry` — мінулы раз прыйшоў няпоўны адказ і засталіся ранейшыя поўныя звесткі
+        climate.append((cell, top[0], top[1], practical.climate_full(cached) and not cached.get("retry")))
     return {"weather": weather, "osm": osm, "routes": drive, "names": names,
-            "rates": [(day, day in usd) for day in sorted(price_days(h, start))]}
+            "rates": [(day, day in usd) for day in sorted(price_days(h, start))], "climate": climate}
 
 
 def main(argv=None) -> None:
@@ -167,6 +195,7 @@ def main(argv=None) -> None:
     routes = dict(read_json(routes_path, {}).get("routes") or {})
     routes_saved = dict(routes)
     osm_todo: list[tuple[str, list[float]]] = []
+    climate_todo: dict[str, tuple[float, float]] = {}  # квадрат → пункт; адзін запыт на квадрат
     places = hints = drives = 0
     session = requests.Session()
     session.headers["User-Agent"] = "my-hiking-site (personal hiking map)"
@@ -254,6 +283,11 @@ def main(argv=None) -> None:
         # --- даты цэн у «Як дабрацца»
         rate_days |= {day for day, _ in need["rates"]}
 
+        # --- звычайнае надвор'е па месяцах (самі запыты — пасля цыкла, з паўзамі)
+        for cell, lat, lng, have in need["climate"]:
+            if args.refresh or not have:
+                climate_todo.setdefault(cell, (lat, lng))
+
     # --- падказкі OpenStreetMap
     for i in range(0, len(osm_todo), OSM_BATCH):
         batch = osm_todo[i:i + OSM_BATCH]
@@ -271,6 +305,35 @@ def main(argv=None) -> None:
                                                         "key": practical.osm_key(bbox), "fetched": today, "items": inside})
             hints += 1
             print(f"  ↓ {slug}: OpenStreetMap — {len(inside)} аб'ектаў у вобласці трэку")
+
+    # --- звычайнае надвор'е па месяцах: адзін запыт на квадрат, з паўзамі (ліміт бясплатнага доступу)
+    climates = 0
+    for i, (cell, (lat, lng)) in enumerate(sorted(climate_todo.items())):
+        if i:
+            time.sleep(CLIMATE_PAUSE_S)
+        try:
+            found = fetch_climate(session, lat, lng)
+        except ERRORS as exc:
+            failed += 1
+            print(f"  ! звычайнае надвор'е {cell} не атрымана — {exc}")
+            if "429" in str(exc):  # ліміт на гадзіну або суткі: далей пытаць няма сэнсу
+                failed += len(climate_todo) - i - 1
+                print("  ! ліміт запытаў Open-Meteo — запусціце `hike fetch` пазней, спампуецца тое, чаго няма")
+                break
+            continue
+        path = CACHE / "climate" / f"{cell}.json"
+        old = read_json(path)
+        if not practical.climate_full(found):
+            partial += 1
+            if practical.climate_full(old):
+                # Няпоўны адказ не замяняе поўныя звесткі: яны застаюцца, а квадрат пазначаецца для паўтору.
+                write_json(path, {**old, "retry": True}, compact=True)
+                print(f"  ! {cell}: звычайнае надвор'е прыйшло няпоўным — застаюцца ранейшыя поўныя звесткі")
+                continue
+        write_json(path, {**found, "fetched": today}, compact=True)
+        climates += 1
+        note = "" if practical.climate_full(found) else " (няпоўныя звесткі — паспрабуйце пазней)"
+        print(f"  ↓ {cell}: звычайнае надвор'е за {practical.CLIMATE_YEARS[0]}–{practical.CLIMATE_YEARS[1]}{note}")
 
     # --- курс лары на даты цэн
     rates_path = CACHE / "rates.json"
@@ -294,7 +357,7 @@ def main(argv=None) -> None:
         write_json(rates_path, {"source": "National Bank of Georgia, official rate, GEL per 1 USD", "USD": usd})
 
     print(f"Надвор'е: спампавана дзён {fetched}. Курсаў: {got}. OpenStreetMap: паходаў {hints}. "
-          f"Маршрутаў на машыне: {drives}. Назваў месцаў: {places}."
+          f"Маршрутаў на машыне: {drives}. Назваў месцаў: {places}. Звычайнае надвор'е: квадратаў {climates}."
           + (f" Не атрымана: {failed}." if failed else "") + (f" Няпоўных адказаў: {partial}." if partial else "")
           + " Гатова → cache/. Далей: hike build")
     if failed or partial:

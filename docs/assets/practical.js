@@ -1,7 +1,8 @@
 // Блок «Практычная інфармацыя» на старонцы паходу.
 // facts — разлік па трэку (тып маршруту, старт і фініш, светлавы дзень, тэмп, рэльеф);
 // days[].weather — надвор'е паводле мадэлі Open-Meteo; practical — звесткі аўтара з файла паходу;
-// drive — дарога на машыне паводле сэрвісу маршрутаў; hints — месцы з OpenStreetMap каля трэку.
+// drive — дарога на машыне паводле сэрвісу маршрутаў; hints — месцы з OpenStreetMap каля трэку;
+// climate — звычайнае надвор'е па месяцах у найвышэйшым пункце (архіў Open-Meteo).
 // Пад кожнай часткай падпісана, адкуль даныя.
 import { h } from "./dom.js";
 import { dateRange, duration, hasText as has, num, pick, shortDate, t } from "./i18n.js";
@@ -189,6 +190,36 @@ function weatherGroup(hike, day) {
   ], null);
 }
 
+/** Месяцы паходу (0–11): ад даты пачатку да даты заканчэння ўключна. */
+function hikeMonths(hike) {
+  const months = new Set();
+  const [y0, m0] = hike.date.split("-").map(Number);
+  const [y1, m1] = (hike.end || hike.date).split("-").map(Number);
+  for (let y = y0, m = m0; (y < y1 || (y === y1 && m <= m1)) && months.size < 12; m === 12 ? (y++, m = 1) : m++) months.add(m - 1);
+  return months;
+}
+
+/**
+ * Звычайнае надвор'е па месяцах у найвышэйшым пункце трэку (архіў Open-Meteo): сярэдняя тэмпература ўдзень
+ * і ўначы, ападкі за месяц і дні з ападкамі — падказка, калі туды лепш ісці. Месяцы паходу вылучаныя.
+ */
+function climateGroup(hike) {
+  const c = hike.climate;
+  if (!c?.months?.length) return null;
+  const now = hikeMonths(hike);
+  const signed = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${num(Math.abs(v))}`;
+  const cell = (v, show) => h("td", null, v == null ? "—" : show(v));
+  const cols = t("climateCols");
+  return group(t("climate"), t("climateAt", num(c.alt)), [
+    h("table", { class: "p-climate" },
+      h("thead", null, h("tr", null, h("td", null), ["day", "night", "rain", "wet"].map((k) => h("th", { scope: "col" }, cols[k])))),
+      h("tbody", null, c.months.map((m, i) => h("tr", { class: now.has(i) ? "p-now" : null },
+        h("th", { scope: "row" }, t("monthsShort")[i]),
+        cell(m.max, signed), cell(m.min, signed), cell(m.precip, num), cell(m.wet, num))))),
+    h("p", { class: "p-source" }, t("srcClimate", c.years[0], c.years[1])),
+  ], null);
+}
+
 /** Вузлы блока для старонкі паходу; day — выбраны дзень шматдзённага паходу або null. */
 export function renderPractical(hike, day, openPhoto) {
   const whole = day == null && hike.days.length > 1;
@@ -224,6 +255,8 @@ export function renderPractical(hike, day, openPhoto) {
   }
   const weather = weatherGroup(hike, day);
   if (weather) nodes.push(weather);
+  const climate = climateGroup(hike);
+  if (climate) nodes.push(climate);
   const hints = onDay(hike.hints || [], day);
   if (hints.length) {
     nodes.push(group(t("hints"), String(hints.length), [

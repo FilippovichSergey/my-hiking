@@ -396,6 +396,88 @@ OSM_THIN_KM, OSM_THIN_M = 0.05, 60   # грубы адбор: трэк з пун
 DRIVE_BACK_M = 2000                  # фініш далей за гэта ад старту — лічыцца і дарога ад фінішу
 
 
+# --- Звычайнае надвор'е па месяцах -----------------------------------------------------
+
+CLIMATE_YEARS = (2020, 2024)   # пяць гадоў дзённых даных: даўжэйшы шэраг Open-Meteo лічыць за занадта шмат запытаў
+# Мадэль выбіраецца яўна: па змаўчанні Open-Meteo спалучае розныя мадэлі (IFS, ERA5, ERA5-Land), і шэраг не аднародны.
+# ERA5-Seamless — тэмпература з ERA5-Land (сетка каля 11 км), ападкі з ERA5 (каля 25 км).
+CLIMATE_MODEL = "era5_seamless"
+CLIMATE_LAPSE = 0.0065         # °C на метр: тэмпература пералічваецца з вышыні даных на вышыню пункта
+CLIMATE_DAILY = ("temperature_2m_max", "temperature_2m_min", "precipitation_sum")
+CLIMATE_WET_MM = 1.0           # дзень з ападкамі — калі выпала не менш за 1 мм
+
+
+def climate_point(days: list[dict]) -> tuple | None:
+    """Найвышэйшы пункт трэку (шырата, даўгата, вышыня): для яго паказваецца звычайнае надвор'е — там халадней
+    за ўсё, і там лягчэй за ўсё трапіць пад снег. None, калі вышыні ў трэку няма."""
+    pts = [p for day in days for p in _points(day) if p[2] is not None]
+    if not pts:
+        return None
+    top = max(pts, key=lambda p: p[2])
+    return top[0], top[1], top[2]
+
+
+def climate_key(lat: float, lng: float) -> str:
+    """Квадрат сеткі 0,1° (каля 10 км): адзін запыт на ўсе паходы ў ім. Ключ — і імя файла кэша."""
+    return f"{lat:.1f}_{lng:.1f}"
+
+
+def climate_days() -> list[str]:
+    """Усе дні CLIMATE_YEARS па парадку (ISO) — якія даты павінны быць у адказе."""
+    first, last = date(CLIMATE_YEARS[0], 1, 1), date(CLIMATE_YEARS[1], 12, 31)
+    return [(first + timedelta(days=i)).isoformat() for i in range((last - first).days + 1)]
+
+
+def climate_ok(cached) -> bool:
+    """Ці можна паказваць звесткі з файла кэша: тая ж мадэль і гады, вышыня даных і дзённыя рады роўна па ўсіх
+    днях гэтых гадоў. Пра паўнату не кажа: асобныя значэнні могуць адсутнічаць (гл. climate_full)."""
+    if not isinstance(cached, dict) or cached.get("years") != list(CLIMATE_YEARS) or cached.get("model") != CLIMATE_MODEL:
+        return False
+    daily, elevation = cached.get("daily"), cached.get("elevation")
+    if not isinstance(daily, dict) or not isinstance(elevation, (int, float)) or isinstance(elevation, bool):
+        return False
+    return (daily.get("time") == climate_days()
+            and all(isinstance(daily.get(k), list) and len(daily[k]) == len(daily["time"]) for k in CLIMATE_DAILY))
+
+
+def climate_full(cached) -> bool:
+    """Ці спампавана ўсё: звесткі падыходзяць (climate_ok) і ў іх ёсць кожнае значэнне кожнага дня."""
+    return climate_ok(cached) and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        for k in CLIMATE_DAILY for v in cached["daily"][k])
+
+
+def climate_months(cached: dict, alt: float) -> list[dict] | None:
+    """Звычайнае надвор'е па месяцах на вышыні alt: 12 запісаў {max, min, precip, wet} — сярэдняя тэмпература
+    ўдзень і ўначы (°C, пералічаная на вышыню), ападкі за месяц (мм) і колькасць дзён з ападкамі. Месяц, у якім
+    не хапае паловы дзён, застаецца без лічбаў. None — даных няма зусім."""
+    daily = cached["daily"]
+    shift = (cached["elevation"] - alt) * CLIMATE_LAPSE
+    years = CLIMATE_YEARS[1] - CLIMATE_YEARS[0] + 1
+    by_month: dict[int, list[int]] = {}
+    for i, day in enumerate(daily["time"]):
+        if isinstance(day, str) and len(day) >= 7 and day[5:7].isdigit():
+            by_month.setdefault(int(day[5:7]), []).append(i)
+
+    def values(name: str, idx: list[int]) -> list[float]:
+        found = [daily[name][i] for i in idx]
+        return [v for v in found if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+
+    months = []
+    for month in range(1, 13):
+        idx = by_month.get(month, [])
+        hot, cold, rain = (values(name, idx) for name in CLIMATE_DAILY)
+        enough = lambda got: idx and len(got) >= len(idx) / 2  # noqa: E731
+        months.append({
+            "max": round(sum(hot) / len(hot) + shift) if enough(hot) else None,
+            "min": round(sum(cold) / len(cold) + shift) if enough(cold) else None,
+            # за месяц у сярэднім: сума за ўсе гады, пералічаная на ўсе дні (калі якіх-небудзь не хапае)
+            "precip": round(sum(rain) * len(idx) / len(rain) / years) if enough(rain) else None,
+            "wet": round(sum(v >= CLIMATE_WET_MM for v in rain) * len(idx) / len(rain) / years) if enough(rain) else None,
+        })
+    return months if any(any(v is not None for v in m.values()) for m in months) else None
+
+
 def osm_bbox(days: list[dict]) -> list[float] | None:
     """[поўдзень, захад, поўнач, усход] трэку з запасам — вобласць пошуку ў OpenStreetMap.
 

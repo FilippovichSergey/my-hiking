@@ -813,6 +813,105 @@ test("старонка паходу: «Я хадзіў сюды яшчэ» са 
   }
 });
 
+test("статыстыка па гадах і асабістыя рэкорды", async () => {
+  const find = (slug) => DATA.hikes.find((hk) => hk.slug === slug);
+  const before = DATA.hikes.map((hk) => [hk, hk.date, hk.end, hk.stats]);
+  // прабел паміж разрадамі лічбы (1 200) залежыць ад браўзера — у параўнанні яго няма
+  const text = (el) => el.textContent.replace(/\s+/g, " ").replace(/(\d) (?=\d)/g, "$1").trim();
+  find("late").date = find("late").end = "2024-06-01";
+  find("late").stats = stats(45, 300);
+  find("guria").date = find("guria").end = "2024-07-01";
+  try {
+    await go("#/be");
+    const link = panel().querySelector(".stats-link");
+    assert.deepEqual([text(link), link.getAttribute("href")], ["Статыстыка па гадах", "#/be/stats"]);
+    link.click();
+    await waitFor(() => panel().querySelector(".stats-table"), "старонка статыстыкі");
+    assert.equal(window.location.hash, "#/be/stats");
+    assert.equal(document.title, "Статыстыка па гадах · Мае паходы");
+    assert.equal(text(panel().querySelector("h1")), "Статыстыка па гадах");
+    const rows = (part) => [...panel().querySelectorAll(`.stats-table ${part} tr`)].map((tr) => [...tr.children].map(text));
+    assert.deepEqual(rows("thead"), [["Год", "Паходаў", "Дзён", "Км", "Набор, м"]]);
+    // 2025: slow, broken (2 дні), mismatch (2 дні), notrack, trek3 (3 дні, без трэку); 2024: late і guria
+    assert.deepEqual(rows("tbody"), [["2025", "5", "9", "30", "300"], ["2024", "2", "2", "50", "1200"]]);
+    assert.deepEqual(rows("tfoot"), [["Усяго", "7", "11", "80", "1500"]]);
+    assert.deepEqual([...panel().querySelectorAll(".stats-bar")].map((b) => b.style.getPropertyValue("--w").trim()), ["60%", "100%"],
+      "даўжыня палоскі — кіламетры года адносна найбольшага");
+
+    const records = [...panel().querySelectorAll(".records > li")].map((li) =>
+      [text(li.querySelector(".record-head span")), text(li.querySelector(".record-head b")), text(li.querySelector(".card-title"))]);
+    assert.deepEqual(records, [
+      ["Найдаўжэйшы паход", "45 км", "late"], ["Найбольшы набор вышыні", "900 м", "guria"], ["Найвышэйшы пункт", "2000 м", "slow"],
+      ["Найдаўжэй у руху", "50 хв", "slow"], ["Найдаўжэйшы па днях", "3 дні", "trek3"],
+    ]);
+    // мова мяняецца, а старонка застаецца тая ж
+    document.querySelector('[data-lang="ru"]').click();
+    await waitFor(() => text(panel().querySelector("h1")) === "Статистика по годам", "статыстыка па-руску");
+    assert.equal(window.location.hash, "#/ru/stats");
+    assert.equal(text(panel().querySelector(".records > li .record-head span")), "Самый длинный поход");
+    document.querySelector('[data-lang="be"]').click();
+    await waitFor(() => text(panel().querySelector("h1")) === "Статыстыка па гадах", "зноў па-беларуску");
+
+    // год — спасылка на спіс паходаў гэтага года; рэкорд — картка паходу
+    panel().querySelector(".stats-year").click();
+    await waitFor(() => window.location.hash === "#/be" && panel().querySelector(".result-count"), "спіс паходаў года");
+    assert.equal(text(panel().querySelector(".result-count")), "5 паходаў");
+    panel().querySelector(".reset").click();
+    await go("#/be/stats");
+    panel().querySelector(".records .card").click();
+    await waitFor(() => window.location.hash === "#/be/late", "старонка паходу-рэкорду");
+  } finally {
+    for (const [hk, date, end, st] of before) Object.assign(hk, { date, end, stats: st });
+    await go("#/be");
+  }
+});
+
+test("звычайнае надвор'е па месяцах: табліца, вылучаныя месяцы паходу, крыніца", async () => {
+  const guria = DATA.hikes.find((hk) => hk.slug === "guria");
+  const months = Array.from({ length: 12 }, (_, i) => ({ max: i - 2, min: i - 9, precip: 100 + i, wet: i }));
+  months[5] = { max: null, min: null, precip: null, wet: null };
+  const group = () => [...panel().querySelectorAll(".p-group")].find((g) => g.querySelector("summary").textContent.startsWith("Звычайнае надвор'е"));
+  const now = () => [...group().querySelectorAll("tbody tr.p-now th")].map((th) => th.textContent);
+  try {
+    guria.climate = { alt: 2100, years: [2020, 2024], months };
+    await go("#/be/guria");
+    await waitFor(() => group(), "блок звычайнага надвор'я");
+    assert.equal(group().querySelector(".p-hint").textContent.replace(/\s+/g, " ").replace(/(\d) (?=\d)/g, "$1"), "у найвышэйшым пункце, 2100 м");
+    assert.deepEqual([...group().querySelectorAll("thead th")].map((th) => th.textContent), ["Удзень, °C", "Уначы, °C", "Ападкі, мм", "Дні з ападкамі"]);
+    const rows = [...group().querySelectorAll("tbody tr")].map((tr) => [...tr.children].map((c) => c.textContent));
+    assert.equal(rows.length, 12);
+    assert.deepEqual(rows[0], ["студз", "−2", "−9", "100", "0"]);
+    assert.deepEqual(rows[2], ["сак", "0", "−7", "102", "2"]);
+    assert.deepEqual(rows[5], ["чэрв", "—", "—", "—", "—"], "месяц без даных");
+    assert.deepEqual(rows[11], ["снеж", "+9", "+2", "111", "11"]);
+    assert.deepEqual(now(), ["студз"], "паход 1 студзеня");
+    assert.match(group().querySelector(".p-source").textContent, /^Паводле архіва Open-Meteo \(рэаналіз ERA5-Land і ERA5\): сярэдняе за 2020–2024/);
+
+    // паход праз некалькі месяцаў і праз Новы год
+    guria.end = "2025-03-02";
+    await go("#/be/slow");
+    await go("#/be/guria");
+    await waitFor(() => group(), "блок пасля змены дат");
+    assert.deepEqual(now(), ["студз", "лют", "сак"]);
+    guria.date = "2024-12-30";
+    guria.end = "2025-01-02";
+    await go("#/en/guria");
+    await waitFor(() => [...panel().querySelectorAll(".p-group summary")].some((s) => s.textContent.startsWith("Typical weather")), "па-англійску");
+    const en = [...panel().querySelectorAll(".p-group")].find((g) => g.querySelector("summary").textContent.startsWith("Typical weather"));
+    assert.deepEqual([...en.querySelectorAll("tbody tr.p-now th")].map((th) => th.textContent), ["Jan", "Dec"]);
+    // паход без звычайнага надвор'я — без блока
+    delete guria.climate;
+    await go("#/be/slow");
+    await go("#/be/guria");
+    await waitFor(() => panel().querySelector("h1")?.textContent === "guria", "паход без звычайнага надвор'я");
+    assert.equal(group(), undefined);
+  } finally {
+    delete guria.climate;
+    guria.date = guria.end = "2025-01-01";
+    await go("#/be");
+  }
+});
+
 test("даныя паходаў бяруцца па адрасе з версіяй з index.html", () => {
   const meta = document.querySelector('meta[name="hikes-data"]');
   assert.match(meta.content, /^data\/hikes\.json\?v=[0-9a-f]{10}$/, "версію даных запісвае `hike build`");

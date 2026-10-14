@@ -638,10 +638,12 @@ def inputs_key(slug: str, h: dict, tour_ids: list, raw: list[dict], prev: dict |
     dates |= {d.get("date") for d in raw or (prev or {}).get("days") or []} | {iso_date(h["date"]) if h.get("date") else None}
     videos = h.get("youtube") if isinstance(h.get("youtube"), list) else []
     drive = practical.drive_targets(raw).items() if home else ()
+    top = practical.climate_point(raw)
     parts = {
         "hike": yaml.safe_dump(h, allow_unicode=True, sort_keys=False),
         "tours": {str(t): [digest(CACHE / "komoot" / "tours" / f"{t}.json"), shared["tours"].get(t)] for t in tour_ids},
         "weather": digest(CACHE / "weather" / f"{slug}.json"), "osm": digest(CACHE / "osm" / f"{slug}.json"),
+        "climate": digest(CACHE / "climate" / f"{practical.climate_key(top[0], top[1])}.json") if top else None,
         "routes": {key: shared["routes"].get(key) for key in (practical.drive_key(home, target, name == "back") for name, target in drive)},
         "places": places, "own": {name: shared["own"].get(name) for name in named},
         "rates": {day: shared["rates"].get(day) for day in sorted(d for d in dates if d)},
@@ -721,6 +723,7 @@ def main(argv=None) -> None:
     drive_routes, place_cache, own_places = shared["routes"], shared["names"], shared["own"]
     no_weather: set[str] = set()
     no_services: set[str] = set()
+    no_climate: set[str] = set()
     hikes = []
     for slug, h in sources:
         if h.get("hidden"):
@@ -847,6 +850,15 @@ def main(argv=None) -> None:
         # Падказкі з OpenStreetMap і дарога на машыне — з таго, што спампаваў `hike fetch`, і толькі калі яны
         # адносяцца да гэтага трэку. Апублікаваныя раней застаюцца толькі разам з ранейшым трэкам (тура няма
         # ў кэшы); калі трэку ў паходу больш няма, няма і звестак, якія ад яго залежаць.
+        # Звычайнае надвор'е па месяцах у найвышэйшым пункце трэку — з таго, што спампаваў `hike fetch`.
+        climate = (prev or {}).get("climate") if kept_track else None
+        top = practical.climate_point(raw) if raw else None
+        if top:
+            cached = read_json(CACHE / "climate" / f"{practical.climate_key(top[0], top[1])}.json")
+            months = practical.climate_months(cached, top[2]) if practical.climate_ok(cached) else None
+            climate = {"alt": round(top[2]), "years": list(practical.CLIMATE_YEARS), "months": months} if months else None
+            if not months:
+                no_climate.add(slug)
         if raw:
             osm = read_json(CACHE / "osm" / f"{slug}.json", {})
             fresh = osm.get("key") == practical.osm_key(practical.osm_bbox(raw))
@@ -878,6 +890,7 @@ def main(argv=None) -> None:
             "practical": notes,      # звесткі аўтара з блока practical:
             "hints": hints,          # месцы з OpenStreetMap каля трэку — не правераныя аўтарам
             "drive": drive,          # дарога на машыне ад home — разлік сэрвісу маршрутаў
+            "climate": climate,      # звычайнае надвор'е па месяцах у найвышэйшым пункце (архіў Open-Meteo)
             "days": days,
             "point": point,
             "bbox": bbox,
@@ -914,6 +927,8 @@ def main(argv=None) -> None:
     (DOCS / ".nojekyll").touch()
     if no_weather:
         print(f"  · надвор'я няма для паходаў: {len(no_weather)} — запусціце `hike fetch`")
+    if no_climate:
+        print(f"  · звычайнага надвор'я па месяцах няма для паходаў: {len(no_climate)} — запусціце `hike fetch`")
     if no_services:
         print(f"  · падказак OpenStreetMap або дарогі на машыне няма для паходаў: {len(no_services)} — запусціце `hike fetch`")
     n_photos = sum(len(h["photos"]) for h in hikes)

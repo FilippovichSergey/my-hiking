@@ -77,7 +77,8 @@ def services_todo(slug: str, need: dict) -> list[tuple]:
              ("няма падказак OpenStreetMap", bool(need["osm"]) and not need["osm"][1]),
              ("няма дарогі на машыне", missing(need["routes"])),
              ("няма назваў населеных пунктаў", missing(need["names"])),
-             ("няма курсу лары", missing(need["rates"]))]
+             ("няма курсу лары", missing(need["rates"])),
+             ("няма звычайнага надвор'я па месяцах або яно няпоўнае", missing(need["climate"]))]
     return [("fetch", what, slug) for what, wanted in found if wanted]
 
 

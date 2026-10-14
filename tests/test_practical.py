@@ -29,6 +29,7 @@ import pages  # noqa: E402
 import practical  # noqa: E402
 import scaffold  # noqa: E402
 import status  # noqa: E402
+import youtube  # noqa: E402
 
 TZ = timezone(timedelta(hours=4))
 CFG = {"site_photos_subfolders": ["Сайт"], "default_utc_offset": 4, "komoot_sports": ["hike"],
@@ -775,6 +776,19 @@ def hourly_answer(params, hole=None):
     return places if len(places) > 1 else places[0]
 
 
+def daily_answer(params, elevation=1000.0, hole=None):
+    """Адказ архіва Open-Meteo з дзённымі данымі: удзень 10 + нумар месяца °C, уначы нумар месяца − 10 °C,
+    ападкі 3 мм кожны трэці дзень месяца (іначай 0,5 мм). hole — паказчык, якога няма."""
+    first, last = date.fromisoformat(params["start_date"]), date.fromisoformat(params["end_date"])
+    days = [first + timedelta(days=i) for i in range((last - first).days + 1)]
+    daily = {"time": [d.isoformat() for d in days],
+             "temperature_2m_max": [10.0 + d.month for d in days], "temperature_2m_min": [d.month - 10.0 for d in days],
+             "precipitation_sum": [3.0 if d.day % 3 == 0 else 0.5 for d in days]}
+    if hole:
+        daily[hole] = [None] * len(days)
+    return {"latitude": float(params["latitude"]), "longitude": float(params["longitude"]), "elevation": elevation, "daily": daily}
+
+
 ROUTE = {"code": "Ok", "routes": [{"distance": 42060.0, "duration": 3760.0}],  # Батумі → Мілісі паводле OSRM
          "waypoints": [{"distance": 12.0}, {"distance": 40.0}]}
 NAMES = {"be": "Мілісі", "en": "Milisi"}
@@ -790,10 +804,11 @@ class FetchProject(PracticalProject):
         self.addCleanup(patcher.stop)
         self.photos_root.mkdir()
 
-    def fetch(self, argv=(), weather=hourly_answer, rate=2.5, osm=(), route=ROUTE, names=NAMES):
+    def fetch(self, argv=(), weather=hourly_answer, rate=2.5, osm=(), route=ROUTE, names=NAMES, climate=None):
         """Запуск `hike fetch` з падмененымі сэрвісамі. Вяртае запыты надвор'я і курсаў і тое, што надрукавана;
-        усе запыты (з Overpass, OSRM і Nominatim) — у self.calls як (сэрвіс, падрабязнасці)."""
-        calls, self.calls = [], []
+        усе запыты (з Overpass, OSRM, Nominatim і звычайнага надвор'я) — у self.calls як (сэрвіс, падрабязнасці).
+        climate — адказ на запыт звычайнага надвор'я; па змаўчанні — daily_answer."""
+        calls, self.calls, self.sleeps = [], [], []  # sleeps — паўзы паміж запытамі (самі паўзы не чакаюцца)
 
         def respond(answer, *args):
             answer = answer(*args) if callable(answer) else answer
@@ -803,6 +818,9 @@ class FetchProject(PracticalProject):
             if url.startswith(fetch.API_ROUTE):
                 self.calls.append(("route", url[len(fetch.API_ROUTE):]))
                 return respond(route, url)
+            if "daily" in (params or {}):  # звычайнае надвор'е па месяцах — той жа архіў, дзённыя даныя
+                self.calls.append(("climate", dict(params)))
+                return respond(climate or daily_answer, params)
             calls.append((url, dict(params or {})))
             self.calls.append(("rate" if url == fetch.API_RATES else "weather", dict(params or {})))
             if url == fetch.API_RATES:
@@ -825,7 +843,7 @@ class FetchProject(PracticalProject):
         out = io.StringIO()
         with unittest.mock.patch("requests.Session.get", fake_get), unittest.mock.patch("requests.Session.post", fake_post), \
                 unittest.mock.patch.object(geo, "_nominatim", fake_nominatim), \
-                unittest.mock.patch("time.sleep", lambda *a: None), unittest.mock.patch("sys.stdout", out):
+                unittest.mock.patch("time.sleep", lambda seconds: self.sleeps.append(seconds)), unittest.mock.patch("sys.stdout", out):
             try:
                 fetch.main(list(argv))
                 self.exit_code = 0
@@ -1014,7 +1032,7 @@ class TestHintsAndDrive(FetchProject):
         far = osm_node(3, 500, -300, amenity="drinking_water")  # у вобласці запыту, але за 300 м ад трэку
         stop = osm_node(4, 0, 10, amenity="shelter", shelter_type="public_transport")
         _, out = self.fetch(osm=[VIEW, far, stop, SPRING])
-        self.assertEqual(sorted(self.kinds()), ["names", "names", "names", "osm", "route", "weather"])
+        self.assertEqual(sorted(self.kinds()), ["climate", "names", "names", "names", "osm", "route", "weather"])
         calls = dict(self.calls)
         bbox = practical.osm_bbox(practical.raw_days([1], 4))
         self.assertEqual(bbox, [40.996, 41.996, 41.013, 42.016])
@@ -1030,7 +1048,7 @@ class TestHintsAndDrive(FetchProject):
         self.fetch()
         self.assertEqual(self.calls, [], "другі запуск нічога не пытае")
         self.fetch(["--refresh"], osm=[VIEW, SPRING])
-        self.assertEqual(sorted(self.kinds()), ["osm", "route", "weather"], "назвы месцаў не перапытваюцца")
+        self.assertEqual(sorted(self.kinds()), ["climate", "osm", "route", "weather"], "назвы месцаў не перапытваюцца")
 
         index, out = self.build()
         h = index["h"]
@@ -1087,7 +1105,7 @@ practical:
         self.assertNotIn("place", index["h"]["facts"]["start"])
         self.assertIn("падказак OpenStreetMap або дарогі на машыне няма для паходаў: 1", out)
         self.fetch(osm=[osm_node(6, 5500, 0, natural="spring")])
-        self.assertEqual(sorted(self.kinds()), ["names", "names", "names", "osm", "route", "weather"],
+        self.assertEqual(sorted(self.kinds()), ["climate", "names", "names", "names", "osm", "route", "weather"],
                          "для новага трэку ўсё пытаецца зноў")
         index, out = self.build()
         self.assertEqual([(q["osm"], q["pos"]["km"]) for q in index["h"]["hints"]], [("node/6", 0.5)])
@@ -2717,7 +2735,8 @@ class TestPlacesAndStatus(StatusProject):
                          ["surface", "water.available", "water.drunk", "water.left", "water.taken"], "false і лік — гэта адказ")
         self.assertEqual((lake["photos"], [(command, what) for command, what, _ in lake["todo"]]), (None, [
             ("fetch", "няма надвор'я або яно няпоўнае"), ("fetch", "няма падказак OpenStreetMap"), ("fetch", "няма дарогі на машыне"),
-            ("fetch", "няма назваў населеных пунктаў"), ("build", "яшчэ не на сайце")]))
+            ("fetch", "няма назваў населеных пунктаў"), ("fetch", "няма звычайнага надвор'я па месяцах або яно няпоўнае"),
+            ("build", "яшчэ не на сайце")]))
         self.assertEqual((secret["hidden"], secret["todo"]), (True, []), "схаваны паход на сайт не ідзе")
         text = self.report()
         self.assertIn(".\\hike build  — яшчэ не на сайце: 2025-06-02-ridge, 2025-06-01-lake", text)
@@ -2729,7 +2748,8 @@ class TestPlacesAndStatus(StatusProject):
         self.assertEqual(self.todo(), [".\\hike fetch  — няма надвор'я або яно няпоўнае: " + both,
                                        ".\\hike fetch  — няма падказак OpenStreetMap: " + both,
                                        ".\\hike fetch  — няма дарогі на машыне: " + both,
-                                       ".\\hike fetch  — няма назваў населеных пунктаў: " + both])
+                                       ".\\hike fetch  — няма назваў населеных пунктаў: " + both,
+                                       ".\\hike fetch  — няма звычайнага надвор'я па месяцах або яно няпоўнае: " + both])
         # спампавана, але яшчэ не сабрана
         self.fetch(names=self.KEDA)
         self.assertEqual(self.todo()[0], BUILD_CHANGED + both)
@@ -3390,6 +3410,257 @@ class TestReview1112(StatusProject):
         self.assertNotEqual(cache()["key"], old_key)
         _, out = self.fetch(names=self.KEDA)
         self.assertEqual((self.exit_code, cache()["complete"]), (0, True), out)
+
+
+class TestClimate(FetchProject):
+    """Звычайнае надвор'е па месяцах у найвышэйшым пункце трэку (архіў Open-Meteo, CLIMATE_YEARS)."""
+
+    PARAMS = {"latitude": 41.0, "longitude": 42.0, "start_date": "2020-01-01", "end_date": "2024-12-31"}
+
+    def test_months_at_the_altitude_of_the_point(self):
+        cached = {"years": [2020, 2024], "model": practical.CLIMATE_MODEL, **daily_answer(self.PARAMS)}
+        self.assertTrue(practical.climate_ok(cached))
+        months = practical.climate_months(cached, 1000.0)
+        # тэмпература — як у даных (на вышыні 1000 м), ападкі: 10 або 11 дзён па 3 мм і астатнія па 0,5 мм
+        self.assertEqual([(m["max"], m["min"]) for m in months], [(10 + n, n - 10) for n in range(1, 13)])
+        self.assertEqual([m["wet"] for m in months], [10, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10])
+        self.assertEqual(months[0]["precip"], round((10 * 3.0 + 21 * 0.5)))  # студзень: 10 «мокрых» дзён і 21 сухі
+        # на 1500 м — на 3,25 °C халадней; ападкі тыя ж
+        high = practical.climate_months(cached, 1500.0)
+        self.assertEqual([(m["max"], m["min"]) for m in high[:2]], [(round(11 - 3.25), round(-9 - 3.25)), (round(12 - 3.25), round(-8 - 3.25))])
+        self.assertEqual([m["precip"] for m in high], [m["precip"] for m in months])
+
+        # прапушчаныя даныя: менш за палову дзён месяца — без лічбаў; без ападкаў — тэмпература застаецца
+        holey = {"years": [2020, 2024], "model": practical.CLIMATE_MODEL, **daily_answer(self.PARAMS, hole="precipitation_sum")}
+        self.assertEqual({(m["precip"], m["wet"]) for m in practical.climate_months(holey, 1000.0)}, {(None, None)})
+        self.assertEqual(practical.climate_months(holey, 1000.0)[6]["max"], 17)
+        broken = {"years": [2020, 2024], "model": practical.CLIMATE_MODEL, **daily_answer(self.PARAMS)}
+        broken["daily"]["temperature_2m_max"] = [None if day.startswith(("2020-03", "2021-03", "2022-03")) else v
+                                                 for day, v in zip(broken["daily"]["time"], broken["daily"]["temperature_2m_max"])]
+        self.assertEqual((practical.climate_months(broken, 1000.0)[2]["max"], practical.climate_months(broken, 1000.0)[2]["min"]), (None, -7))
+        empty = {"years": [2020, 2024], "model": practical.CLIMATE_MODEL, **daily_answer(self.PARAMS)}
+        for key in practical.CLIMATE_DAILY:
+            empty["daily"][key] = [None] * len(empty["daily"]["time"])
+        self.assertIsNone(practical.climate_months(empty, 1000.0))
+        # кэш іншых гадоў, без вышыні або з няпоўнымі радамі не падыходзіць
+        self.assertFalse(practical.climate_ok({**cached, "years": [2019, 2023]}))
+        self.assertFalse(practical.climate_ok({**cached, "elevation": None}))
+        self.assertFalse(practical.climate_ok({**cached, "daily": {**cached["daily"], "precipitation_sum": [1.0]}}))
+        self.assertFalse(practical.climate_ok(None))
+
+        # найвышэйшы пункт трэку і квадрат сеткі
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))  # вышыня расце да сярэдзіны шляху (1400 м)
+        top = practical.climate_point(practical.raw_days([1], 4))
+        self.assertEqual((round(top[0], 5), round(top[1], 5), top[2]), (round(41.0 + 1000 * M, 5), round(42.0 + 1000 * M / 0.7547, 5), 1400.0))
+        self.assertEqual(practical.climate_key(top[0], top[1]), "41.0_42.0")
+        self.assertIsNone(practical.climate_point([]))
+
+    def test_fetch_and_build(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        self.add_tour(2, "2025-07-01T04:00:00Z", path((0, 0), (500, 0), (0, 0)))           # той жа квадрат сеткі
+        self.add_tour(3, "2025-08-01T04:00:00Z", path((30000, 0), (31000, 0), (30000, 0)))  # іншы квадрат
+        for slug, tid in (("a", 1), ("b", 2), ("c", 3)):
+            (self.content / f"{slug}.yaml").write_text(f"date: 2025-0{tid + 5}-01\ntitle: {{be: {slug}}}\nkomoot: [{tid}]\n", encoding="utf-8")
+        _, out = self.fetch(climate=lambda params: daily_answer(params, elevation=900.0))
+        asked = [(c["latitude"], c["longitude"], c["start_date"], c["end_date"], c["daily"]) for kind, c in self.calls if kind == "climate"]
+        self.assertEqual(asked, [(41.0, 42.0, "2020-01-01", "2024-12-31", "temperature_2m_max,temperature_2m_min,precipitation_sum"),
+                                 (41.3, 42.0, "2020-01-01", "2024-12-31", "temperature_2m_max,temperature_2m_min,precipitation_sum")],
+                         "адзін запыт на квадрат 0,1°")
+        self.assertEqual(self.sleeps.count(fetch.CLIMATE_PAUSE_S), 1, "паміж запытамі — паўза (ліміт бясплатнага доступу)")
+        self.assertIn("Звычайнае надвор'е: квадратаў 2.", out)
+        self.assertEqual(self.exit_code, 0, out)
+
+        index, out = self.build()
+        self.assertNotIn("звычайнага надвор'я", out)
+        a, b = index["a"]["climate"], index["b"]["climate"]
+        self.assertEqual((a["alt"], a["years"], len(a["months"])), (1400, [2020, 2024], 12))
+        self.assertEqual(a["months"][6], {"max": round(17 - 500 * 0.0065), "min": round(-3 - 500 * 0.0065), "precip": 40, "wet": 10},
+                         "ліпень на 1400 м: даныя на 900 м пералічаныя на вышыню")
+        self.assertEqual(b["alt"], 1400)
+        self.assertEqual(index["c"]["climate"]["months"][0]["max"], round(11 - 500 * 0.0065))
+        self.fetch()
+        self.assertNotIn("climate", [kind for kind, _ in self.calls], "у кэшы ўжо ёсць")
+
+        # кэша для квадрата няма: на сайце звычайнага надвор'я няма, зборка і status раяць `hike fetch`
+        (build.CACHE / "climate" / "41.3_42.0.json").unlink()
+        index, out = self.build()
+        self.assertIsNone(index["c"]["climate"])
+        self.assertIn("звычайнага надвор'я па месяцах няма для паходаў: 1 — запусціце `hike fetch`", out)
+        need = fetch.needs("c", {}, practical.raw_days([3], 4), None, None, {}, {})
+        self.assertEqual([(cell, have) for cell, _, _, have in need["climate"]], [("41.3_42.0", False)])
+        # ліміт сэрвісу (HTTP 429): астатнія квадраты не пытаюцца, каманда завяршаецца з кодам 1
+        (build.CACHE / "climate" / "41.0_42.0.json").unlink()
+        _, out = self.fetch(climate=FakeResponse({"error": True, "reason": "limit"}, status=429))
+        self.assertEqual(([kind for kind, _ in self.calls].count("climate"), self.exit_code), (1, 1), out)
+        self.assertIn("ліміт запытаў Open-Meteo", out)
+        self.assertIn("Не атрымана: 2.", out)
+        # іншая памылка аднаго квадрата не спыняе астатнія
+        _, out = self.fetch(climate=lambda params: daily_answer(params) if params["latitude"] == 41.3 else FakeResponse({}, status=500))
+        self.assertEqual(([kind for kind, _ in self.calls].count("climate"), self.exit_code), (2, 1), out)
+        self.assertTrue((build.CACHE / "climate" / "41.3_42.0.json").exists())
+
+        # тура няма ў кэшы, застаецца ранейшы трэк — і ранейшае звычайнае надвор'е
+        self.fetch()
+        before = self.build()[0]["a"]["climate"]
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        self.assertEqual(self.build()[0]["a"]["climate"], before)
+
+
+class TestReview1120(StatusProject):
+    """Рэгрэсіі па review_2026-10-14_v1.12.0.md."""
+
+    CELL = build.CACHE  # падмяняецца ў setUp: шлях да кэша квадрата паходу
+
+    def setUp(self):
+        super().setUp()
+        self.hike()
+        self.places('Keda: "Кеда"\n')
+        self.CELL = build.CACHE / "climate" / "41.0_42.0.json"
+
+    def january(self):
+        return self.build()[0]["h"]["climate"]
+
+    def asked(self):
+        return [kind for kind, _ in self.calls].count("climate")
+
+    def test_incomplete_climate_does_not_count_as_fetched(self):  # №1
+        need = [".\\hike fetch  — няма звычайнага надвор'я па месяцах або яно няпоўнае: h"]
+        holey = lambda params: daily_answer(params, hole="precipitation_sum")  # noqa: E731
+        self.fetch(names=self.KEDA)
+        full = self.january()
+        self.assertEqual(full["months"][0], {"max": 8, "min": -12, "precip": 40, "wet": 10})
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # --refresh, адказ без ападкаў: поўныя звесткі застаюцца, код 1, status раіць fetch, наступны fetch пытае зноў
+        saved = common.read_json(self.CELL)
+        _, out = self.fetch(["--refresh"], names=self.KEDA, climate=holey)
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertIn("звычайнае надвор'е прыйшло няпоўным — застаюцца ранейшыя поўныя звесткі", out)
+        self.assertEqual(common.read_json(self.CELL), {**saved, "retry": True})
+        self.assertEqual(self.january(), full, "на сайце — ранейшыя поўныя звесткі")
+        self.assertEqual(self.todo(), need)
+        _, out = self.fetch(names=self.KEDA, climate=holey)
+        self.assertEqual((self.asked(), self.exit_code), (1, 1), out)
+        _, out = self.fetch(names=self.KEDA)
+        self.assertEqual((self.asked(), self.exit_code, "retry" in common.read_json(self.CELL)), (1, 0, False), out)
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # пусты кэш, адказ без ападкаў: вядомае паказваецца, але спампаваным не лічыцца
+        self.CELL.unlink()
+        _, out = self.fetch(names=self.KEDA, climate=holey)
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertIn("(няпоўныя звесткі — паспрабуйце пазней)", out)
+        self.assertEqual(self.january()["months"][0], {"max": 8, "min": -12, "precip": None, "wet": None})
+        self.assertEqual(self.todo(), need)
+        # усе паказчыкі пустыя: паказваць няма чаго, а fetch пытае зноў
+        empty = lambda params: {**daily_answer(params), "daily": {"time": daily_answer(params)["daily"]["time"],  # noqa: E731
+                                                                  **{k: [None] * 1827 for k in practical.CLIMATE_DAILY}}}
+        _, out = self.fetch(names=self.KEDA, climate=empty)
+        self.assertEqual((self.asked(), self.exit_code), (1, 1), out)
+        self.assertIsNone(self.january())
+        self.assertEqual(self.todo(), need)
+        _, out = self.fetch(names=self.KEDA, climate=empty)
+        self.assertEqual(self.asked(), 1, "і зноў пытае")
+        # адказ не за тыя дні (зрушаны на дзень) — гэта памылка, кэш не мяняецца
+        shifted = lambda params: daily_answer({**params, "start_date": "2020-01-02"})  # noqa: E731
+        before = self.CELL.read_bytes()
+        _, out = self.fetch(names=self.KEDA, climate=shifted)
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertIn("нечаканы адказ сэрвісу надвор'я", out)
+        self.assertEqual(self.CELL.read_bytes(), before)
+        # поўны адказ: усё на месцы
+        _, out = self.fetch(names=self.KEDA)
+        self.assertEqual(self.exit_code, 0, out)
+        self.assertEqual(self.january(), full)
+        self.assertEqual(self.todo(), ALL_DONE)
+
+    def test_climate_model_is_chosen_and_stored(self):  # №2
+        self.fetch(names=self.KEDA)
+        (params,) = [c for kind, c in self.calls if kind == "climate"]
+        self.assertEqual(params["models"], "era5_seamless")
+        cached = common.read_json(self.CELL)
+        self.assertEqual((cached["model"], cached["source"]),
+                         ("era5_seamless", "Open-Meteo Historical Weather API, ERA5-Seamless (ERA5-Land, ERA5)"))
+        self.build()
+        self.fetch(names=self.KEDA)
+        self.assertEqual(self.asked(), 0, "актуальны кэш выкарыстоўваецца")
+        # кэш ранейшай версіі (без мадэлі — Best Match сэрвісу) не падыходзіць: квадрат пытаецца нанова
+        common.write_json(self.CELL, {k: v for k, v in cached.items() if k != "model"}, compact=True)
+        self.assertIsNone(self.january(), "звесткі іншай мадэлі на сайт не трапляюць")
+        self.assertEqual(self.todo(), [".\\hike fetch  — няма звычайнага надвор'я па месяцах або яно няпоўнае: h"])
+        self.fetch(names=self.KEDA)
+        self.assertEqual(self.asked(), 1)
+        self.assertEqual(common.read_json(self.CELL)["model"], "era5_seamless")
+
+
+class TestReview1121(PracticalProject):
+    """Рэгрэсіі па review_2026-10-14_v1.12.1.md: код выхаду імпарту YouTube."""
+
+    def youtube(self, listing, videos):
+        """`hike youtube` з падмененым yt-dlp: listing — id відэа на канале (або выключэнне), videos — id → назва і дата
+        або выключэнне. Вяртае (код выхаду, stdout, stderr, кэш)."""
+        class FakeYoutubeDL:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                if url.endswith("/videos"):
+                    if isinstance(listing, Exception):
+                        raise listing
+                    return {"entries": [{"id": vid, "title": f"t-{vid}"} for vid in listing]}
+                answer = videos[url.rsplit("=", 1)[1]]
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with unittest.mock.patch.multiple(youtube, YoutubeDL=FakeYoutubeDL, YT_PATH=build.CACHE / "youtube.json",
+                                          load_config=lambda: {"youtube_channel": "https://www.youtube.com/@test"}), \
+                unittest.mock.patch("sys.stdout", out), unittest.mock.patch("sys.stderr", err):
+            try:
+                youtube.main([])
+            except SystemExit as stop:
+                code = stop.code if isinstance(stop.code, int) else 1
+                err.write(str(stop.code) if not isinstance(stop.code, int) else "")
+        return code, out.getvalue(), err.getvalue(), common.read_json(build.CACHE / "youtube.json")
+
+    def test_youtube_import_reports_missing_videos(self):
+        old = {"id": "old", "title": "Стары", "upload_date": "20250101", "duration": 60}
+        common.write_json(build.CACHE / "youtube.json", [old])
+        new = lambda vid, day: {"title": f"Відэа {vid}", "upload_date": day, "duration": 100}  # noqa: E731
+
+        # новае відэа не атрымана: старое застаецца, новага ў кэшы няма, код 1
+        code, out, err, cache = self.youtube(["new_video_1", "old"], {"new_video_1": RuntimeError("temporary HTTP 503")})
+        self.assertEqual(code, 1, out)
+        self.assertIn("! new_video_1: temporary HTTP 503", err)
+        self.assertIn("Не атрымана: 1", out)
+        self.assertEqual(cache, [{**old, "title": "t-old"}])
+
+        # з двух новых атрымана адно: яно захоўваецца, код усё роўна 1
+        code, out, err, cache = self.youtube(["a", "b", "old"], {"a": new("a", "20250301"), "b": RuntimeError("Private video")})
+        self.assertEqual((code, [v["id"] for v in cache]), (1, ["a", "old"]), out)
+        # паўтор атрымаў прапушчанае: код 0
+        code, out, err, cache = self.youtube(["a", "b", "old"], {"b": new("b", "20250401")})
+        self.assertEqual((code, [v["id"] for v in cache], err), (0, ["b", "a", "old"], ""), out)
+        self.assertNotIn("Не атрымана", out)
+        # новага няма: нічога не пытаецца, код 0
+        code, out, err, cache = self.youtube(["a", "b", "old"], {})
+        self.assertEqual((code, len(cache)), (0, 3), out)
+
+        # спіс канала не атрыманы: паведамленне, код 1, кэш не мяняецца
+        before = (build.CACHE / "youtube.json").read_bytes()
+        code, out, err, cache = self.youtube(RuntimeError("HTTP 500"), {})
+        self.assertEqual(code, 1)
+        self.assertIn("Спіс відэа канала не атрыманы — HTTP 500", err)
+        self.assertEqual((build.CACHE / "youtube.json").read_bytes(), before)
 
 
 def fetch_failure():

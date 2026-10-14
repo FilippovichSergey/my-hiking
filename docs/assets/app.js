@@ -2,7 +2,7 @@
 import { copyText, cssVar, downloadFile, h, s } from "./dom.js";
 import { gpxText } from "./gpx.js";
 import { renderPractical } from "./practical.js";
-import { dateRange, durationParts, lang, LANGS, num, pick, setLang, shortDate, t } from "./i18n.js";
+import { dateRange, duration, durationParts, lang, LANGS, num, pick, setLang, shortDate, t } from "./i18n.js";
 import { createMap } from "./map.js";
 import { hikePhotos, hikePois } from "./pois.js";
 import { renderProfile } from "./profile.js";
@@ -27,14 +27,17 @@ const state = {
   view: "list", // тэлефон: што на экране — панэль ("list") ці карта ("map")
   version: "", // версія сайта з індэкса (яе запісвае `hike build` з файла VERSION)
   share: false, // ці ёсць старонкі <мова>/<паход>/ з прэв'ю для спасылак
+  stats: false, // ці адкрыта старонка «Статыстыка па гадах»
 };
 const trackCache = new Map();
 let map, profile, renderToken = 0;
 
 // --- Мова і тэма ------------------------------------------------------------
 
-// адрас старонкі: #/<мова> або #/<мова>/<паход>
+// адрас старонкі: #/<мова>, #/<мова>/<паход> або #/<мова>/stats (статыстыка па гадах; паход так звацца не можа —
+// імя файла паходу пачынаецца з даты)
 const ROUTE_RE = new RegExp(`^#/(${LANGS.join("|")})(?:/([\\w-]+))?`);
+const STATS = "stats";
 
 function initialLang() {
   const fromHash = location.hash.match(ROUTE_RE);
@@ -118,6 +121,10 @@ function route() {
     applyLangChrome();
   }
   const slug = m?.[2];
+  if (slug === STATS) {
+    renderStats();
+    return;
+  }
   const hike = slug && state.hikes.find((hk) => hk.slug === slug);
   if (hike) {
     if (state.selected !== hike) state.day = null;
@@ -247,6 +254,7 @@ function renderList() {
   const wasSelected = !!state.selected;
   state.selected = null;
   state.day = null;
+  state.stats = false;
   updateViewToggle();
   document.title = t("siteTitle");
   map.clearSelection();
@@ -288,6 +296,7 @@ function renderList() {
   // replaceChildren ператварае null у тэкст «null», таму неабавязковыя вузлы адсейваюцца
   body.replaceChildren(...[
     summaryTiles(list),
+    h("a", { class: "link-btn stats-link", href: `#/${lang}/${STATS}` }, actionIcon(STATS_ICON), t("statsTitle")),
     h("div", { class: "filters" },
       search,
       h("div", { class: "chips", role: "group", "aria-label": t("allYears") },
@@ -344,6 +353,68 @@ function card(hk) {
     h("span", { class: "card-meta", style: "display:block" },
       [dateRange(hk.date, hk.end), pick(hk.region)].filter(Boolean).join(" · ")),
     h("span", { class: "card-nums" }, nums.map((n) => h("span", null, n)), diffBadge(hk.difficulty)))));
+}
+
+// --- Статыстыка па гадах і асабістыя рэкорды ----------------------------------
+
+const STATS_ICON = "M4 20V11m6 9V5m6 15v-6m4 6H2";
+// Рэкорд: які паказчык паходу параўноўваецца і як яго паказаць. Паход без паказчыка ў параўнанні не ўдзельнічае.
+const RECORDS = {
+  distance: [(hk) => hk.stats?.distance, (v) => `${num(v, 1)} ${t("km")}`],
+  up: [(hk) => hk.stats?.up, (v) => `${num(v)} ${t("m")}`],
+  alt: [(hk) => hk.stats?.maxAlt, (v) => `${num(v)} ${t("m")}`],
+  moving: [(hk) => hk.stats?.moving, (v) => duration(v)],
+  days: [(hk) => (dayCount(hk) > 1 ? dayCount(hk) : null), (v) => t("days", v)],
+};
+
+/** Паходы, кіламетры і набор вышыні па гадах (па даце пачатку паходу) і асабістыя рэкорды — па ўсіх паходах. */
+function renderStats() {
+  ++renderToken;
+  profile?.destroy();
+  profile = null;
+  state.selected = null;
+  state.day = null;
+  state.stats = true;
+  updateViewToggle();
+  document.title = `${t("statsTitle")} · ${t("siteTitle")}`;
+  map.clearSelection();
+  map.setHikes(state.hikes);
+
+  const sum = (hikes, value) => hikes.reduce((n, hk) => n + (value(hk) || 0), 0);
+  const years = [...new Set(state.hikes.map((hk) => hk.date.slice(0, 4)))].sort().reverse()
+    .map((year) => {
+      const hikes = state.hikes.filter((hk) => hk.date.startsWith(year));
+      return { year, hikes: hikes.length, days: sum(hikes, dayCount), km: sum(hikes, (hk) => hk.stats?.distance), up: sum(hikes, (hk) => hk.stats?.up) };
+    });
+  const widest = Math.max(1, ...years.map((y) => y.km));
+  const cols = t("statsCols");
+  const openYear = (year) => { state.filters.year = year; go(null); };
+  const line = (head, y) => h("tr", null, head, h("td", null, num(y.hikes)), h("td", null, num(y.days)),
+    h("td", { class: "stats-km" }, num(Math.round(y.km)),
+      head.tagName === "TH" ? h("span", { class: "stats-bar", style: `--w:${Math.round((y.km / widest) * 100)}%`, "aria-hidden": "true" }) : null),
+    h("td", null, num(y.up)));
+  const total = { hikes: state.hikes.length, days: sum(state.hikes, dayCount), km: sum(state.hikes, (hk) => hk.stats?.distance), up: sum(state.hikes, (hk) => hk.stats?.up) };
+
+  const records = Object.entries(RECORDS).map(([key, [value, show]]) => {
+    const best = state.hikes.filter((hk) => value(hk) != null)
+      .reduce((top, hk) => (!top || value(hk) > value(top) ? hk : top), null);
+    return best ? h("li", null, h("div", { class: "record-head" }, h("span", null, t("recordNames")[key]), h("b", null, show(value(best)))),
+      h("ul", { class: "hike-list" }, card(best))) : null;
+  }).filter(Boolean);
+
+  body.replaceChildren(...[
+    h("button", { type: "button", class: "back", onclick: () => go(null) }, "← ", t("back")),
+    h("article", { class: "detail" },
+      h("h1", null, t("statsTitle")),
+      state.hikes.length ? h("table", { class: "stats-table" },
+        h("thead", null, h("tr", null, ["year", "hikes", "days", "km", "up"].map((k) => h("th", { scope: "col" }, cols[k])))),
+        h("tbody", null, years.map((y) => line(h("th", { scope: "row" },
+          h("button", { type: "button", class: "stats-year", title: t("statsYear", y.year), onclick: () => openYear(y.year) }, y.year)), y))),
+        h("tfoot", null, line(h("td", null, t("statsTotal")), total))) : h("p", { class: "empty" }, t("nothing")),
+      records.length ? [h("h2", null, t("records")), h("ul", { class: "records" }, records)] : null),
+    siteFooter(),
+  ].filter(Boolean));
+  body.scrollTop = 0;
 }
 
 // --- Старонка паходу --------------------------------------------------------
@@ -403,6 +474,7 @@ function actionIcon(path) {
 async function renderDetail(hike, fit = true) {
   const token = ++renderToken;
   state.selected = hike;
+  state.stats = false;
   updateViewToggle();
   document.title = `${pick(hike.title)} · ${t("siteTitle")}`;
   const track = await loadTrack(hike);
@@ -577,7 +649,7 @@ async function main() {
   darkMq.addEventListener("change", onThemeChange);
   for (const b of document.querySelectorAll("[data-lang]")) {
     b.addEventListener("click", () => {
-      const slug = state.selected?.slug;
+      const slug = state.selected?.slug || (state.stats ? STATS : null);
       setLang(b.dataset.lang);
       try { localStorage.setItem("lang", b.dataset.lang); } catch {}
       applyLangChrome();
