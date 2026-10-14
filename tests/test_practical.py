@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -22,9 +23,11 @@ import build  # noqa: E402
 import common  # noqa: E402
 import fetch  # noqa: E402
 import geo  # noqa: E402
+import komoot  # noqa: E402
 import pages  # noqa: E402
 import practical  # noqa: E402
 import scaffold  # noqa: E402
+import status  # noqa: E402
 
 TZ = timezone(timedelta(hours=4))
 CFG = {"site_photos_subfolders": ["Сайт"], "default_utc_offset": 4, "komoot_sports": ["hike"],
@@ -2587,6 +2590,532 @@ class TestReview192(FetchProject):
                 for clock_error in (0, 4):  # гадзіннік камеры дакладны або спяшаецца на чатыры хвіліны
                     shot = (moment + timedelta(minutes=clock_error)).isoformat()
                     self.assertEqual(place(days, shot, at)["km"], want, (at, real, clock_error))
+
+
+class StatusProject(FetchProject):
+    """Часовы праект для `hike status` і свайго слоўніка назваў (content/places.yaml)."""
+
+    FOLDER = "20250601_Возера"
+    KEDA = {"be": "Keda", "en": "Keda", "ru": "Кеда"}  # беларускай назвы ў OpenStreetMap няма
+
+    def setUp(self):
+        super().setUp()
+        patcher = unittest.mock.patch.multiple(status, CACHE=build.CACHE, CONTENT=self.content, DOCS=build.DOCS,
+                                               load_config=lambda: self.cfg)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def places(self, text):
+        (self.content.parent / "places.yaml").write_text(text, encoding="utf-8")
+
+    def names(self, index, slug="h"):
+        """Назвы старту і фінішу паходу і яго дзён: усе аднолькавыя — вяртаецца адна."""
+        h = index[slug]
+        found = [item[edge]["place"] for item in [h["facts"]] + [d["facts"] for d in h["days"]] for edge in ("start", "finish")]
+        self.assertTrue(all(place == found[0] for place in found), found)
+        return found[0]
+
+    def report(self, *argv):
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stdout", out):
+            status.main(list(argv))
+        return out.getvalue()
+
+    def todo(self, *argv):
+        """Радкі раздзела «Што зрабіць» без водступаў."""
+        text = self.report(*argv)
+        return [line.strip() for line in text.split("Што зрабіць\n")[1].splitlines()] if "Што зрабіць\n" in text else []
+
+
+BUILD_CHANGED = ".\\hike build  — пасля зборкі змяніліся файл паходу, слоўнік назваў або спампаваныя звесткі: "
+BUILD_PHOTOS = ".\\hike build  — фота на сайце не тыя, што ў тэчцы: ёсць новыя, змененыя, выдаленыя або зборка не скончылася: "
+ALL_DONE = ["нічога: усё спампавана і сабрана"]
+
+
+class TestPlacesAndStatus(StatusProject):
+    """Свае назвы населеных пунктаў (content/places.yaml) і каманда `hike status`."""
+
+    def test_own_place_names_replace_the_names_from_openstreetmap(self):
+        self.hike()
+        self.fetch(names=self.KEDA)
+        self.assertEqual(self.names(self.build()[0]), self.KEDA)
+
+        self.places('Keda: "Кеда"\n')
+        index, out = self.build()
+        self.assertEqual(self.names(index), {"be": "Кеда", "en": "Keda", "ru": "Кеда"})
+        self.assertNotIn("places.yaml", out)
+        self.places('# рэгістр назвы не важны\nkeda: {be: "Кеда", ru: "Кэда"}\nTago:\nBako: ""\n')
+        index, out = self.build()
+        self.assertEqual(self.names(index), {"be": "Кеда", "en": "Keda", "ru": "Кэда"})
+        self.assertNotIn("places.yaml", out, "пусты запіс — яшчэ не запоўнены, не памылка")
+
+        # няправільны запіс прапускаецца з папярэджаннем — застаецца назва з OpenStreetMap
+        for bad in ("Keda: 5", "Keda: [Кеда]", 'Keda: {en: "Keda!"}', 'Keda: {be: "Кеда", ru: 7}', 'Keda: {be: " "}'):
+            self.places(bad + "\n")
+            index, out = self.build()
+            self.assertEqual(self.names(index), self.KEDA, bad)
+            self.assertIn("places.yaml: «Keda»", out, bad)
+        # памылка YAML спыняе зборку, пакуль нічога не зменена
+        before = (build.DOCS / "data" / "hikes.json").read_bytes()
+        self.places('Keda: "Кеда\n')
+        with self.assertRaises(SystemExit) as stop:
+            self.build()
+        self.assertIn("places.yaml", str(stop.exception))
+        self.assertEqual((build.DOCS / "data" / "hikes.json").read_bytes(), before)
+
+        # тура няма ў кэшы: трэк і назвы ранейшыя, але слоўнік дзейнічае
+        self.places('Keda: "Кеда"\n')
+        self.build()
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        index, out = self.build()
+        self.assertIn("застаецца апублікаваны раней трэк", out)
+        self.assertEqual(self.names(index), {"be": "Кеда", "en": "Keda", "ru": "Кеда"})
+        self.places('Keda: {be: "Кэда", ru: "Кеда-2"}\n')
+        self.assertEqual(self.names(self.build()[0]), {"be": "Кэда", "en": "Keda", "ru": "Кеда-2"})
+
+        # назва без запісу ў слоўніку — як і была; пункт без назвы застаецца без назвы
+        self.assertEqual(geo.place_label({"be": "Мілісі", "en": "Milisi"}, {"keda": {"be": "Кеда"}}), {"be": "Мілісі", "en": "Milisi"})
+        self.assertEqual(geo.place_label({"be": "", "en": "", "ru": ""}, {"": {"be": "Нешта"}}), None)
+        self.assertEqual(geo.place_label(None, {}), None)
+
+    def project(self):
+        """Тры паходы: «Возера» амаль без звестак, «Хрыбет» запоўнены, трэці схаваны."""
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path(*SQUARE))
+        (self.content / "2025-06-01-lake.yaml").write_text(
+            f"date: 2025-06-01\ntitle: Возера\nkomoot: [1]\nphotos_folder: {self.FOLDER}\n", encoding="utf-8")
+        (self.content / "2025-06-02-ridge.yaml").write_text(
+            "date: 2025-06-02\ntitle: {be: Хрыбет, ru: Хребет, en: Ridge}\ndifficulty: easy\nkomoot: [2]\nyoutube: [v1]\n"
+            "impressions: {be: Прыгожа., ru: Красиво.}\n"
+            "practical:\n  surface: грунт\n  marking: ''\n  places: []\n"
+            "  water: {taken: 2, left: 0.5, drunk: 1.5, available: false, sources: []}\n", encoding="utf-8")
+        (self.content / "2025-06-03-secret.yaml").write_text(
+            "date: 2025-06-03\ntitle: Таямніца\nhidden: true\nkomoot: [3]\n", encoding="utf-8")
+        self.photo(self.FOLDER, "A.jpg", "2025:06:01 09:00:00")
+        self.photo(self.FOLDER, "B.jpg", "2025:05:31 19:00:00")  # напярэдадні: месца на трэку няма
+
+    def test_status_shows_what_is_missing(self):
+        self.assertEqual({path for path, _ in status.PRACTICAL} - {"water.taken", "water.left", "water.drunk", "water.refilled",
+                         "water.available", "water.sources", "getting_there", "places", "weather_notes"}, set(practical.NOTE_KEYS))
+        self.assertEqual(self.report(), "Паходаў пакуль няма: content/hikes пустая.\n")
+        self.project()
+
+        # сайт яшчэ не сабраны
+        rows = {r["slug"][11:]: r for r in status.collect()[0]}
+        self.assertEqual([r["slug"][11:] for r in status.collect()[0]], ["secret", "ridge", "lake"], "найноўшыя першымі")
+        lake, ridge, secret = rows["lake"], rows["ridge"], rows["secret"]
+        self.assertEqual((lake["title"], lake["names"], lake["difficulty"], lake["story"], len(lake["gaps"]), lake["videos"], lake["track"]),
+                         ("Возера", {"be": True, "ru": False, "en": False}, False, {"be": False, "ru": False, "en": False}, 20, 0, True))
+        self.assertEqual((ridge["names"], ridge["difficulty"], ridge["story"], ridge["videos"]),
+                         ({"be": True, "ru": True, "en": True}, True, {"be": True, "ru": True, "en": False}, 1))
+        self.assertEqual(sorted(set(dict(status.PRACTICAL)) - {path for path, _ in ridge["gaps"]}),
+                         ["surface", "water.available", "water.drunk", "water.left", "water.taken"], "false і лік — гэта адказ")
+        self.assertEqual((lake["photos"], [(command, what) for command, what, _ in lake["todo"]]), (None, [
+            ("fetch", "няма надвор'я або яно няпоўнае"), ("fetch", "няма падказак OpenStreetMap"), ("fetch", "няма дарогі на машыне"),
+            ("fetch", "няма назваў населеных пунктаў"), ("build", "яшчэ не на сайце")]))
+        self.assertEqual((secret["hidden"], secret["todo"]), (True, []), "схаваны паход на сайт не ідзе")
+        text = self.report()
+        self.assertIn(".\\hike build  — яшчэ не на сайце: 2025-06-02-ridge, 2025-06-01-lake", text)
+        self.assertIn("2025-06-03  Таямніца (схаваны)", text)
+
+        # сабраны без `hike fetch`: звестак сэрвісаў няма, а збіраць нанова няма чаго
+        both = "2025-06-02-ridge, 2025-06-01-lake"
+        self.build()
+        self.assertEqual(self.todo(), [".\\hike fetch  — няма надвор'я або яно няпоўнае: " + both,
+                                       ".\\hike fetch  — няма падказак OpenStreetMap: " + both,
+                                       ".\\hike fetch  — няма дарогі на машыне: " + both,
+                                       ".\\hike fetch  — няма назваў населеных пунктаў: " + both])
+        # спампавана, але яшчэ не сабрана
+        self.fetch(names=self.KEDA)
+        self.assertEqual(self.todo()[0], BUILD_CHANGED + both)
+        self.build()
+        text = self.report()
+        for line in ("паход                            назва  скл  уражанні  практ  фота  на карце  відэа",
+                     "                                 ru en       be ru en",
+                     "2025-06-03  Таямніца (схаваны)   –  –   –    –  –  –       –     ?                –",
+                     "2025-06-02  Хрыбет               +  +   +    +  +  –    5/20     –                1",
+                     "2025-06-01  Возера               –  –   –    –  –  –       –     2       1/2      –",
+                     "Зводка: паходаў 2 (і схаваных: 1)", "  назва па-руску         1 з 2", "  складанасць            1 з 2",
+                     "  уражанні               1 з 2  (па-руску 1, па-англійску 0)", "  практычная частка      1 з 2",
+                     "  фота                   1 з 2  (месца на карце ёсць у 1 фота з 2)", "  відэа                  1 з 2",
+                     "  content\\places.yaml — няма беларускай назвы (на сайце лацінкай): Keda", '   Keda: "…"'):
+            self.assertIn(line + "\n", text)
+        self.assertNotIn(".\\hike", text, "спампоўваць і збіраць больш няма чаго")
+        self.places('Keda: "Кеда"\n')
+        self.assertEqual(self.todo(), [BUILD_CHANGED + both], "назва ў слоўніку ёсць, але сайт яшчэ не перасабраны")
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+        common.write_json(build.CACHE / "komoot" / "tours.json", [{"id": 1, "status": "private"}, {"id": 2, "status": "public"}])
+        self.build()
+        self.assertEqual(self.todo(), ["Komoot — туры не публічныя, спасылкі «Трэк у Komoot» на сайце няма: паходаў 1"])
+
+        # падрабязнасці — па тэксце з імя файла або назвы на любой мове
+        text = self.report("lake")
+        self.assertNotIn("Хрыбет", text)
+        self.assertNotIn("Зводка", text)
+        self.assertIn("2025-06-01-lake.yaml — Возера\n"
+                      "  дапісаць: назва па-руску, назва па-англійску, складанасць (difficulty), уражанні (impressions)\n"
+                      "  практычная частка (practical:) — не запоўнена. Што можна запісаць:\n"
+                      "    вада: узята на старце (water.taken)\n", text)
+        self.assertIn("  фота без месца на карце: 1 з 2 (запіс трэку: 2025-06-01 08:00–12:00)\n"
+                      "    B.jpg — знята 31.05.2025 19:00 — не падчас запісу трэку\n", text)
+        text = self.report("хреб")
+        self.assertIn("2025-06-02-ridge.yaml — Хрыбет\n  дапісаць: уражанні па-англійску\n"
+                      "  практычная частка (practical:) — запоўнена 5 з 20. Няма:\n    вада: даліта на маршруце (water.refilled)\n", text)
+        self.assertIn("    маркіроўка (marking)\n", text)
+        self.assertNotIn("(surface)", text)
+        self.assertNotIn("фота без месца", text)
+        self.assertEqual(self.report("няма", "такога"), "Паходаў з «няма такога» у назве або імені файла няма.\n")
+
+        # файл зменены пасля зборкі; новы паход без тура ў кэшы; файл выдалены, а паход яшчэ на сайце
+        ridge_file = self.content / "2025-06-02-ridge.yaml"
+        ridge_file.write_text(ridge_file.read_text(encoding="utf-8").replace("Красиво.", "Очень красиво."), encoding="utf-8")
+        (self.content / "2025-06-04-new.yaml").write_text("date: 2025-06-04\ntitle: Новы\nkomoot: [9, 2]\n", encoding="utf-8")
+        (self.content / "2025-06-01-lake.yaml").unlink()
+        text = self.report()
+        for line in ("  .\\hike komoot — няма тураў у кэшы: 2025-06-04-new (9)",
+                     "  .\\hike fetch  — няма надвор'я або яно няпоўнае: 2025-06-04-new",
+                     "  .\\hike build  — яшчэ не на сайце: 2025-06-04-new",
+                     "  " + BUILD_CHANGED + "2025-06-02-ridge",
+                     "  .\\hike build  — на сайце ёсць, а файла няма або паход схаваны: 2025-06-01-lake"):
+            self.assertIn(line + "\n", text)
+        self.assertLess(text.index("hike komoot"), text.index("hike fetch"), "каманды — у парадку запуску")
+        self.assertLess(text.index("hike fetch"), text.index("hike build"))
+        self.assertIn("2025-06-04  Новы", text)
+        self.assertIn("?", text.split("2025-06-04  Новы")[1].splitlines()[0], "колькі фота на сайце, яшчэ невядома")
+
+        import hike
+        self.assertEqual(hike.COMMANDS["status"], "status")
+        self.assertIn("status ", hike.__doc__)
+
+
+class TestReview1100(StatusProject):
+    """Рэгрэсіі па review_2026-10-14_v1.10.0.md."""
+
+    def built(self, extra="", **fetched):
+        """Адзін паход h (квадрат 4 км), усё спампавана і сабрана."""
+        self.hike(extra)
+        self.fetch(names=self.KEDA, **fetched)
+        return self.build()[0]
+
+    def edit(self, old, new):
+        text = (self.content / "h.yaml").read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        (self.content / "h.yaml").write_text(text.replace(old, new), encoding="utf-8")
+
+    def test_status_asks_to_build_after_any_change_of_the_inputs(self):  # №1
+        own = ["content\\places.yaml — няма беларускай назвы (на сайце лацінкай): Keda", 'дапішыце радкі выгляду   Keda: "…"']
+        index = self.built(f"photos_folder: {self.FOLDER}\npractical:\n  water: {{available: false}}\n")
+        self.photo(self.FOLDER, "A.jpg", "2025:06:01 09:00:00")
+        self.assertEqual(self.todo(), [BUILD_PHOTOS + "h"] + own)
+        index = self.build()[0]
+        self.assertEqual((self.todo(), len(index["h"]["inputs"])), (own, 12))
+
+        # практычная частка
+        self.edit("available: false", "available: true")
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"] + own)
+        self.assertIs(common.read_json(build.DOCS / "data" / "hikes.json")["hikes"][0]["practical"]["water"]["available"], False)
+        self.assertIs(self.build()[0]["h"]["practical"]["water"]["available"], True)
+        self.assertEqual(self.todo(), own, "пасля зборкі падказкі няма")
+        # каментарый і парадак радкоў у файле сайт не мяняюць — лішняй падказкі няма
+        self.edit("title: {be: H}", "title: {be: H}   # назва")
+        self.assertEqual(self.todo(), own)
+        # любое іншае поле: папраўка гадзінніка камеры
+        self.edit("practical:", 'photo_clock:\n  - {shift: "+1h"}\npractical:')
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"] + own)
+        self.build()
+
+        # слоўнік назваў: запіс пра іншую вёску паходу не датычыць
+        self.places('Tago: "Таго"\n')
+        self.assertEqual(self.todo(), own)
+        self.places('Tago: "Таго"\nKeda: "Кеда"\n')
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"])
+        self.assertEqual(common.read_json(build.DOCS / "data" / "hikes.json")["hikes"][0]["facts"]["start"]["place"]["be"], "Keda")
+        self.assertEqual(self.build()[0]["h"]["facts"]["start"]["place"]["be"], "Кеда")
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # спампаваныя звесткі: новыя падказкі OpenStreetMap ужо ў кэшы, але яшчэ не на сайце
+        (build.CACHE / "osm" / "h.json").unlink()
+        self.assertEqual(self.todo(), [".\\hike fetch  — няма падказак OpenStreetMap: h", BUILD_CHANGED + "h"])
+        self.fetch(names=self.KEDA, osm=[VIEW])
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"])
+        self.assertEqual(len(self.build()[0]["h"]["hints"]), 1)
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # фота: зменена, выдалена; дыск адключаны — невядома, падказкі няма
+        self.photo(self.FOLDER, "B.jpg", "2025:06:01 10:00:00")
+        self.assertEqual(self.todo(), [BUILD_PHOTOS + "h"])
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+        (self.photos_root / self.FOLDER / "Сайт" / "B.jpg").unlink()
+        self.assertEqual(self.todo(), [BUILD_PHOTOS + "h"])
+        saved, self.cfg = self.cfg, {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"], "змяніліся налады, а пра фота без дыска невядома")
+        self.cfg = saved
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # сайт сабраны іншай версіяй скрыптоў
+        with unittest.mock.patch.object(status, "read_version", lambda: "9.9.9"):
+            self.assertEqual(self.todo(), [f".\\hike build  — сайт сабраны версіяй {common.read_version()}, а скрыпты цяпер версіі 9.9.9"])
+
+        # тура няма ў кэшы: падказка спампаваць, а збіраць нанова няма чаго, пакуль не змяніўся файл
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        self.assertEqual(self.todo(), [".\\hike komoot — няма тураў у кэшы: h (1)", BUILD_CHANGED + "h"])
+        self.build()
+        self.assertEqual(self.todo(), [".\\hike komoot — няма тураў у кэшы: h (1)"])
+        self.places('Keda: "Кэда"\n')
+        self.assertEqual(self.todo(), [".\\hike komoot — няма тураў у кэшы: h (1)", BUILD_CHANGED + "h"])
+        self.assertEqual(self.build()[0]["h"]["facts"]["start"]["place"]["be"], "Кэда")
+        self.assertEqual(self.todo(), [".\\hike komoot — няма тураў у кэшы: h (1)"])
+
+    def test_status_asks_to_fetch_incomplete_weather_and_a_missing_way_back(self):  # №2
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (3000, 0)))  # 3 км у адзін бок: патрэбна і дарога ад фінішу
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+        self.places('Keda: "Кеда"\n')
+        home = f"{fetch.API_ROUTE}41.59822,41.62692;"
+        self.fetch(names=self.KEDA, weather=lambda params: hourly_answer(params, hole="precipitation"),
+                   route=lambda url: ROUTE if url.startswith(home) else NO_ROUTE)
+        h = self.build()[0]["h"]
+        self.assertEqual((common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]["complete"], sorted(h["drive"])),
+                         (False, ["from", "to"]))
+        self.assertIn("weather", h["days"][0])
+        self.assertEqual(self.todo(), [".\\hike fetch  — няма надвор'я або яно няпоўнае: h", ".\\hike fetch  — няма дарогі на машыне: h"])
+        # тое ж самае запытвае і сам `hike fetch`
+        self.fetch(names=self.KEDA)
+        self.assertEqual(sorted(kind for kind, _ in self.calls), ["route", "weather"])
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"], "спампавана, засталося сабраць")
+        h = self.build()[0]["h"]
+        self.assertEqual(sorted(h["drive"]), ["back", "from", "to"])
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # трэк без часу (імпартаваны GPX): надвор'е для яго не пытаецца ні `hike fetch`, ні status
+        tour = common.read_json(build.CACHE / "komoot" / "tours" / "1.json")
+        tour["coords"] = [c[:3] for c in tour["coords"]]
+        common.write_json(build.CACHE / "komoot" / "tours" / "1.json", tour)
+        (build.CACHE / "weather" / "h.json").unlink()
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"])
+        self.fetch(names=self.KEDA)
+        self.assertNotIn("weather", [kind for kind, _ in self.calls])
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+
+    def test_removed_own_names_give_back_the_names_from_openstreetmap(self):  # №3
+        self.places('Keda: {be: "Кэда", ru: "НЯПРАВІЛЬНА"}\n')
+        index = self.built()
+        self.assertEqual(self.names(index), {"be": "Кэда", "en": "Keda", "ru": "НЯПРАВІЛЬНА"})
+        self.assertEqual(index["h"]["facts"]["start"]["placeOsm"], self.KEDA, "назва з OpenStreetMap захоўваецца побач")
+
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()  # далей — без тура: трэк і назвы ранейшыя
+        (build.CACHE / "geocode.json").unlink()                 # і без кэша назваў
+        self.places('Keda: "Кеда"\n')
+        for attempt in (1, 2):
+            index, out = self.build()
+            self.assertIn("застаецца апублікаваны раней трэк", out)
+            self.assertEqual(self.names(index), {"be": "Кеда", "en": "Keda", "ru": "Кеда"}, f"ru прыбраны са слоўніка, зборка {attempt}")
+        self.places("{}\n")
+        for attempt in (1, 2):
+            index = self.build()[0]
+            self.assertEqual(self.names(index), self.KEDA, f"запісу ў слоўніку больш няма, зборка {attempt}")
+            self.assertNotIn("placeOsm", index["h"]["facts"]["start"])
+            self.assertNotIn("placeOsm", index["h"]["days"][0]["facts"]["finish"])
+        self.places('Keda: {ru: "Кэда"}\n')
+        self.assertEqual(self.names(self.build()[0]), {"be": "Keda", "en": "Keda", "ru": "Кэда"}, "і зноў дадаць можна")
+        (self.content.parent / "places.yaml").unlink()
+        self.assertEqual(self.names(self.build()[0]), self.KEDA)
+
+    def test_status_reports_a_deleted_hike_when_no_files_are_left(self):  # №4
+        self.built()
+        self.places('Keda: "Кеда"\n')
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+        (self.content / "h.yaml").unlink()
+        gone = "\nШто зрабіць\n  .\\hike build  — на сайце ёсць, а файла няма або паход схаваны: h\n"
+        self.assertEqual(self.report(), "Паходаў пакуль няма: content/hikes пустая.\n" + gone)
+        self.assertEqual(self.report("h"), "Паходаў з «h» у назве або імені файла няма.\n" + gone)
+        self.assertEqual(self.report("няма такога"), "Паходаў з «няма такога» у назве або імені файла няма.\n")
+        self.assertEqual(self.build()[0], {})
+        self.assertEqual(self.report(), "Паходаў пакуль няма: content/hikes пустая.\n")
+        self.assertEqual(self.report("h"), "Паходаў з «h» у назве або імені файла няма.\n")
+
+
+class TestReview1101(StatusProject):
+    """Рэгрэсіі па review_2026-10-14_v1.10.1.md."""
+
+    def test_status_asks_to_build_until_the_photos_are_really_on_the_site(self):  # №1
+        self.hike(f"photos_folder: {self.FOLDER}\n")
+        self.places('Keda: "Кеда"\n')
+        self.photo(self.FOLDER, "A.jpg", "2025:06:01 09:00:00")
+        self.fetch(names=self.KEDA)
+        was = self.build()[0]["h"]["photos"][0]["src"]
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # арыгінал заменены іншай выявай; зборка апрацавала фота і спынілася да запісу індэкса
+        source = self.photos_root / self.FOLDER / "Сайт" / "A.jpg"
+        exif = Image.Exif()
+        exif.get_ifd(0x8769)[36867] = "2025:06:01 09:00:00"
+        Image.new("RGB", (80, 60), (10, 200, 90)).save(source, "JPEG", exif=exif)
+        self.assertEqual(self.todo(), [BUILD_PHOTOS + "h"])
+        with unittest.mock.patch.object(pages, "share_pages", side_effect=OSError("simulated locked output")):
+            with self.assertRaises(OSError):
+                self.build()
+        index = common.read_json(build.DOCS / "data" / "hikes.json")["hikes"][0]
+        manifest = common.read_json(build.CACHE / "photos" / "h.json")
+        self.assertEqual(index["photos"][0]["src"], was, "на сайце яшчэ старое фота")
+        self.assertNotEqual(f"photos/h/{manifest['A.jpg']['name']}.webp", was, "а маніфест ужо пра новае")
+        for attempt in (1, 2):
+            self.assertEqual(self.todo(), [BUILD_PHOTOS + "h"], f"зборка не скончылася, праверка {attempt}")
+        now = self.build()[0]["h"]["photos"][0]
+        self.assertNotEqual(now["src"], was)
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # апублікаваныя копіі страчаны, а арыгінал ёсць: зборка іх адновіць
+        for lost in ("thumb", "src"):
+            (build.DOCS / now[lost]).unlink()
+            self.assertEqual(self.todo(), [BUILD_PHOTOS + "h"], lost)
+        self.assertEqual(self.build()[0]["h"]["photos"][0], now)
+        self.assertEqual(self.todo(), ALL_DONE)
+        # без дыска з арыгіналамі аднавіць няма з чаго — і падказкі няма (застаецца толькі змена налад)
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.build()
+        (build.DOCS / now["thumb"]).unlink()
+        self.assertEqual(self.todo(), ALL_DONE)
+
+    def test_status_and_fetch_use_the_same_days_when_a_tour_is_missing(self):  # №2
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        self.add_tour(2, "2025-06-02T04:00:00Z", path(*SQUARE))
+        # дата ў файле пазнейшая за першы дзень трэку; цана без даты — на дзень пачатку паходу (1 чэрвеня)
+        (self.content / "h.yaml").write_text(
+            "date: 2025-06-02\ntitle: {be: H}\nkomoot: [1, 2]\npractical:\n  getting_there:\n    - {type: taxi, price: 80}\n",
+            encoding="utf-8")
+        self.places('Keda: "Кеда"\n')
+        self.fetch(names=self.KEDA)
+        index = self.build()[0]
+        self.assertEqual((index["h"]["date"], index["h"]["practical"]["gettingThere"][0]["rateDate"]), ("2025-06-01", "2025-06-01"))
+        self.assertEqual(sorted(common.read_json(build.CACHE / "rates.json")["USD"]), ["2025-06-01"])
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # тура другога дня і кэша надвор'я больш няма; на сайце застаецца ранейшы трэк
+        (build.CACHE / "komoot" / "tours" / "2.json").unlink()
+        (build.CACHE / "weather" / "h.json").unlink()
+        self.assertIn("застаецца апублікаваны раней трэк", self.build()[1])
+        need = [".\\hike komoot — няма тураў у кэшы: h (2)"]
+        self.assertEqual(self.todo(), need + [".\\hike fetch  — няма надвор'я або яно няпоўнае: h"],
+                         "тое, што спампуе `hike fetch` для тура, які ёсць; курс на 2 чэрвеня не патрэбны")
+        self.fetch(names=self.KEDA)
+        self.assertEqual([kind for kind, _ in self.calls], ["weather"], "і сам `hike fetch` пытае тое ж: адзін дзень надвор'я")
+        self.assertEqual(self.todo(), need + [BUILD_CHANGED + "h"])
+        self.build()
+        self.assertEqual(self.todo(), need)
+        self.fetch(names=self.KEDA)
+        self.assertEqual(self.calls, [], "больш пытаць няма чаго")
+
+
+class TestReview1102(StatusProject):
+    """Рэгрэсіі па review_2026-10-14_v1.10.2.md."""
+
+    def test_removed_photo_subfolder_clears_the_photo_cache(self):  # №1
+        place = "practical:\n  places:\n    - {type: shelter, photo: A.jpg}\n    - {type: table, km: 2.5}\n"
+
+        def state():
+            index, out = self.build()
+            h = index["h"]
+            return ([Path(p["src"]).stem.split("-")[0] for p in h["photos"]],
+                    [(item["photo"], item["pos"] and item["pos"]["km"]) for item in h["practical"]["places"]],
+                    "месца не вызначана — фота A.jpg няма сярод фота паходу" in out, common.read_json(build.CACHE / "photos" / "h.json"))
+
+        def project():
+            self.tearDown()
+            self.setUp()
+            self.hike(f"photos_folder: {self.FOLDER}\n" + place)
+            self.places('Keda: "Кеда"\n')
+            self.photo(self.FOLDER, "A.jpg", "2025:06:01 09:00:00")
+            self.fetch(names=self.KEDA)
+            photos, places, warned, manifest = state()
+            self.assertEqual((photos, places, warned, list(manifest)), (["a"], [(0, 1.0), (None, 2.5)], False, ["A.jpg"]))
+            self.assertEqual(self.todo(), ALL_DONE)
+
+        # выдалена ўся падтэчка «Сайт»; тэчка паходу і дыск на месцы
+        project()
+        shutil.rmtree(self.photos_root / self.FOLDER / "Сайт")
+        for attempt in (1, 2):
+            self.assertEqual(state(), ([], [(None, None), (None, 2.5)], True, {}), f"зборка {attempt}: фота няма — няма і месца па ім")
+            self.assertEqual(self.todo(), ALL_DONE, f"зборка {attempt}: збіраць больш няма чаго")
+        self.assertFalse((build.DOCS / "photos" / "h").exists())
+        # фота вярнулі — вяртаецца і месца
+        self.photo(self.FOLDER, "A.jpg", "2025:06:01 09:00:00")
+        self.assertEqual(self.todo(), [BUILD_PHOTOS + "h"])
+        self.assertEqual(state()[:3], (["a"], [(0, 1.0), (None, 2.5)], False))
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # прыбрана поле photos_folder
+        project()
+        text = (self.content / "h.yaml").read_text(encoding="utf-8")
+        (self.content / "h.yaml").write_text(text.replace(f"photos_folder: {self.FOLDER}\n", ""), encoding="utf-8")
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"])
+        for attempt in (1, 2):
+            self.assertEqual(state(), ([], [(None, None), (None, 2.5)], True, {}), f"зборка {attempt}")
+            self.assertEqual(self.todo(), ALL_DONE, f"зборка {attempt}")
+
+        # дыск з фота недаступны — гэта не выдаленне: фота, кэш і месца застаюцца
+        project()
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        photos, places, warned, manifest = state()
+        self.assertEqual((photos, places, warned, list(manifest)), (["a"], [(0, 1.0), (None, 2.5)], False, ["A.jpg"]))
+
+    def komoot(self, meta, answers, argv=()):
+        """`hike komoot` без сеткі: уваход, спіс тураў і каардынаты падмененыя."""
+        out = io.StringIO()
+        with unittest.mock.patch.multiple(komoot, KOMOOT_DIR=build.CACHE / "komoot", load_config=lambda: self.cfg,
+                                          login=lambda *a: ("u", "t", "D"), list_recorded_tours=lambda *a: meta,
+                                          fetch_coordinates=lambda session, tid, auth: answers[tid]), \
+                unittest.mock.patch("builtins.input", lambda *a: "e@example.com"), \
+                unittest.mock.patch("getpass.getpass", lambda *a: "p"), \
+                unittest.mock.patch("time.sleep", lambda *a: None), unittest.mock.patch("sys.stdout", out):
+            komoot.main(list(argv))
+        return out.getvalue()
+
+    def test_status_asks_for_komoot_until_the_tour_is_really_updated(self):  # №2
+        tour = lambda revision, metres: {  # noqa: E731
+            "id": 1, "name": "t1", "sport": "hike", "type": "tour_recorded", "status": "public", "date": "2025-06-01T04:00:00Z",
+            "changed_at": revision, "distance": metres, "duration": 14400, "time_in_motion": 10800, "elevation_up": 400,
+            "elevation_down": 400, "start_point": None}
+        square = coords(path(*SQUARE))
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nkomoot: [1]\n", encoding="utf-8")
+        self.places('Keda: "Кеда"\n')
+        self.assertIn("спампавана трэкаў: 1", self.komoot([tour("first", 4000)], {1: square}))
+        self.fetch(names=self.KEDA)
+        self.assertEqual(self.build()[0]["h"]["stats"]["distance"], 4.0)
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # тур змянілі ў Komoot, але адказ з каардынатамі прыйшоў пусты: у кэшы застаецца ранейшы трэк
+        old = ".\\hike komoot — тур у кэшы стары: мінулы раз Komoot аддаў яго няпоўным або тур змяніўся: h (1)"
+        self.assertIn("спампавана трэкаў: 0, без каардынат: 1", self.komoot([tour("second", 9000)], {1: []}))
+        self.assertIs(common.read_json(build.CACHE / "komoot" / "tours" / "1.json")["incomplete"], True)
+        self.assertEqual(self.todo(), [old, BUILD_CHANGED + "h"])
+        self.assertEqual(self.build()[0]["h"]["stats"]["distance"], 4.0, "на сайце старыя лічбы")
+        for attempt in (1, 2):
+            self.assertEqual(self.todo(), [old], f"імпарт яшчэ трэба паўтарыць, праверка {attempt}")
+        # наступны звычайны імпарт атрымаў тур цалкам: засталося толькі сабраць
+        self.assertIn("спампавана трэкаў: 1", self.komoot([tour("second", 9000)], {1: square}))
+        self.assertEqual(self.todo(), [BUILD_CHANGED + "h"])
+        self.assertEqual(self.build()[0]["h"]["stats"]["distance"], 9.0)
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # імпарт перарваўся пасля запісу спіса тураў: спіс ужо новы, а сам тур яшчэ ранейшы
+        common.write_json(build.CACHE / "komoot" / "tours.json", [tour("third", 9000)])
+        self.assertEqual(self.todo(), [old, BUILD_CHANGED + "h"])
+        self.assertIn("спампавана трэкаў: 1", self.komoot([tour("third", 9000)], {1: square}))
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+        self.assertIn("спампавана трэкаў: 0.", self.komoot([tour("third", 9000)], {}), "тур актуальны — паўторна не пытаецца")
+        # тура няма ў спісе тураў (спіс страчаны): параўнаць няма з чым — падказкі няма, пакуль няма меткі
+        (build.CACHE / "komoot" / "tours.json").unlink()
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+        cached = common.read_json(build.CACHE / "komoot" / "tours" / "1.json")
+        common.write_json(build.CACHE / "komoot" / "tours" / "1.json", {**cached, "incomplete": True})
+        self.assertEqual(self.todo(), [old, BUILD_CHANGED + "h"])
 
 
 if __name__ == "__main__":

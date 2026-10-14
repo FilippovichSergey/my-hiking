@@ -5,13 +5,14 @@
   new      стварыць чарнавікі content/hikes/*.yaml для новых паходаў
   fetch    спампаваць надвор'е падчас паходаў і курс лары (для практычнай часткі)
   build    сабраць сайт у docs/ (фота, трэкі, даныя)
+  status   паказаць, чаго не хапае ў паходах (назвы, уражанні, практычная частка, фота на карце)
   serve    запусціць сайт лакальна: http://localhost:8000
 """
 import importlib
 import sys
 
 COMMANDS = {"komoot": "komoot", "youtube": "youtube", "new": "scaffold", "fetch": "fetch", "build": "build",
-            "serve": "serve"}
+            "serve": "serve", "status": "status"}
 
 
 def main() -> None:

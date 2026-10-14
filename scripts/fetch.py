@@ -112,6 +112,46 @@ def fetch_route(session: requests.Session, home: tuple, target: tuple, back: boo
     return found
 
 
+def price_days(h: dict, start: str | None) -> set[str]:
+    """Даты, на якія патрэбны курс лары: даты цэн у «Як дабрацца»; цана без даты — на дзень пачатку паходу."""
+    block = h.get("practical") if isinstance(h.get("practical"), dict) else {}
+    ways = block.get("getting_there") if isinstance(block.get("getting_there"), list) else []
+    days = set()
+    for way in ways:
+        if isinstance(way, dict) and way.get("price") is not None:
+            day = (iso_date(way["date"]) if way.get("date") else None) or start
+            if day:
+                days.add(day)
+    return days
+
+
+def needs(slug: str, h: dict, days: list[dict], start: str | None, home, routes: dict, usd: dict) -> dict:
+    """Якія даныя сэрвісаў патрэбны паходу і ці ёсць яны ўжо ў кэшы. Па гэтым спісе `hike fetch` робіць запыты,
+    а `hike status` кажа, што яшчэ не спампавана, — правілы адны.
+
+    weather: [(дата, пункты, ключ, ёсць)] — дні з часам у трэку; ёсць — калі звесткі для гэтага трэку поўныя;
+    osm: (вобласць, ёсць) або None; routes: [(to | back, пункт, ключ, ёсць)]; names: [(ключ, шырата, даўгата, ёсць)];
+    rates: [(дата, ёсць)].
+    """
+    cached = read_json(CACHE / "weather" / f"{slug}.json", {}).get("days") or {}
+    weather = []
+    for day in days:
+        points = practical.weather_points(day)
+        if not points:
+            continue  # у трэку няма часу (імпартаваны GPX): невядома, калі аўтар быў у пунктах
+        key, have = practical.weather_key(points), cached.get(day["date"])
+        weather.append((day["date"], points, key, bool(have and have.get("key") == key and have.get("complete"))))
+    bbox = practical.osm_bbox(days)
+    osm = (bbox, read_json(CACHE / "osm" / f"{slug}.json", {}).get("key") == practical.osm_key(bbox)) if bbox else None
+    drive = [(name, target, key, key in routes) for name, target in (practical.drive_targets(days).items() if home else ())
+             for key in [practical.drive_key(home, target, name == "back")]]
+    known = read_json(geo.GEOCODE_CACHE, {})
+    spots = {geo.names_key(p[0], p[1]): (p[0], p[1]) for day in days for p in (practical._points(day)[0], practical._points(day)[-1])}
+    names = [(key, lat, lng, "ru" in (known.get(key) or {})) for key, (lat, lng) in spots.items()]  # ёсць на ўсіх мовах сайта
+    return {"weather": weather, "osm": osm, "routes": drive, "names": names,
+            "rates": [(day, day in usd) for day in sorted(price_days(h, start))]}
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="hike fetch")
     ap.add_argument("--refresh", action="store_true", help="перакачаць усё нанова")
@@ -132,7 +172,8 @@ def main(argv=None) -> None:
     silent = io.StringIO()  # папярэджанні пра туры і даты паказвае `hike build`
 
     fetched = failed = 0
-    price_days: set[str] = set()
+    usd_known = read_json(CACHE / "rates.json", {}).get("USD") or {}
+    rate_days: set[str] = set()
     for path in sorted(CONTENT.glob("*.yaml")):
         slug, h = path.stem, load_yaml(path)
         if h.get("hidden"):
@@ -140,6 +181,7 @@ def main(argv=None) -> None:
         with contextlib.redirect_stdout(silent):
             days = practical.raw_days(build.unique_tours(slug, h.get("komoot")), offset)
             start, _ = build.hike_dates(slug, h.get("date"), h.get("end"), days)
+        need = needs(slug, h, days, start, home, routes, usd_known)
 
         # --- надвор'е па днях трэку
         cache_path = CACHE / "weather" / f"{slug}.json"
@@ -147,37 +189,31 @@ def main(argv=None) -> None:
         # Запісваюцца толькі атрыманыя адказы: дзень, тура якога цяпер няма ў кэшы, застаецца — адсутнасць
         # крыніцы не падстава сціраць спампаванае (ці адносіцца яно да трэку, правярае зборка па ключы).
         fresh = dict(cached)
-        for day in days:
-            points = practical.weather_points(day)
-            if not points:
-                continue  # у трэку няма часу (імпартаваны GPX): невядома, калі аўтар быў у пунктах
-            key, have = practical.weather_key(points), cached.get(day["date"])
-            if have and have.get("key") == key and have.get("complete") and not args.refresh:
+        for day_date, points, key, have in need["weather"]:
+            if have and not args.refresh:
                 continue
             try:
                 weather = fetch_day_weather(session, points)
             except ERRORS as exc:
                 failed += 1
-                print(f"  ! {slug}, {day['date']}: надвор'е не атрымана — {exc}")
+                print(f"  ! {slug}, {day_date}: надвор'е не атрымана — {exc}")
                 continue  # ранейшыя звесткі застаюцца
-            fresh[day["date"]] = {"key": key, "fetched": today, **weather}
+            fresh[day_date] = {"key": key, "fetched": today, **weather}
             fetched += 1
             note = "" if weather["complete"] else " (няпоўныя звесткі — паспрабуйце пазней)"
-            print(f"  ↓ {day['date']}  {slug}: надвор'е для {len(points)} пунктаў{note}")
+            print(f"  ↓ {day_date}  {slug}: надвор'е для {len(points)} пунктаў{note}")
             time.sleep(0.2)
         if fresh != cached:
             write_json(cache_path, {"source": "Open-Meteo Historical Weather API", "days": fresh})
 
         # --- падказкі OpenStreetMap у вобласці трэку (самі запыты — пасля цыкла, па некалькі паходаў разам)
-        bbox = practical.osm_bbox(days)
-        if bbox and (args.refresh or read_json(CACHE / "osm" / f"{slug}.json", {}).get("key") != practical.osm_key(bbox)):
-            osm_todo.append((slug, bbox))
+        if need["osm"] and (args.refresh or not need["osm"][1]):
+            osm_todo.append((slug, need["osm"][0]))
 
         # --- дарога на машыне ад home да старту (і ад далёкага фінішу)
-        for name, target in (practical.drive_targets(days).items() if home else ()):
+        for name, target, key, have in need["routes"]:
             back = name == "back"
-            key = practical.drive_key(home, target, back)
-            if key in routes and not args.refresh:
+            if have and not args.refresh:
                 continue
             try:
                 route = fetch_route(session, home, target, back)
@@ -196,24 +232,16 @@ def main(argv=None) -> None:
             routes_saved = dict(routes)
 
         # --- населеныя пункты старту і фінішу кожнага дня (назвы не мяняюцца — --refresh іх не перапытвае)
-        for day in days:
-            pts = practical._points(day)
-            for key, (lat, lng) in {geo.names_key(p[0], p[1]): (p[0], p[1]) for p in (pts[0], pts[-1])}.items():
-                if "ru" in (read_json(geo.GEOCODE_CACHE, {}).get(key) or {}):
-                    continue  # назва ўжо ёсць на ўсіх мовах сайта
-                if geo.place_names(lat, lng) is None:
-                    failed += 1
-                else:
-                    places += 1
+        for key, lat, lng, have in need["names"]:
+            if have:
+                continue
+            if geo.place_names(lat, lng) is None:
+                failed += 1
+            else:
+                places += 1
 
         # --- даты цэн у «Як дабрацца»
-        block = h.get("practical") if isinstance(h.get("practical"), dict) else {}
-        ways = block.get("getting_there") if isinstance(block.get("getting_there"), list) else []
-        for way in ways:
-            if isinstance(way, dict) and way.get("price") is not None:
-                day = (iso_date(way["date"]) if way.get("date") else None) or start
-                if day:
-                    price_days.add(day)
+        rate_days |= {day for day, _ in need["rates"]}
 
     # --- падказкі OpenStreetMap
     for i in range(0, len(osm_todo), OSM_BATCH):
@@ -238,7 +266,7 @@ def main(argv=None) -> None:
     rates = read_json(rates_path, {})
     usd = dict(rates.get("USD") or {})
     got = 0
-    for day in sorted(price_days if args.refresh else price_days - set(usd)):
+    for day in sorted(rate_days if args.refresh else rate_days - set(usd)):
         try:
             rate = fetch_rate(session, day)
         except ERRORS as exc:

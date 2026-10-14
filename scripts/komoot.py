@@ -61,6 +61,12 @@ def fetch_coordinates(session: requests.Session, tour_id, auth) -> list[list[flo
     return coords
 
 
+def needs_fetch(cached: dict | None, meta: dict) -> bool:
+    """Ці трэба спампаваць трэк тура: яго няма ў кэшы, мінулы раз Komoot аддаў яго без каардынат (`incomplete`)
+    або тур з таго часу змяніўся ў Komoot. Па гэтым жа правіле `hike status` раіць запусціць `hike komoot`."""
+    return not cached or bool(cached.get("incomplete")) or cached.get("changed_at") != meta.get("changed_at")
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(prog="hike komoot")
     ap.add_argument("--refresh", action="store_true", help="перакачаць трэкі ўсіх тураў")
@@ -93,8 +99,7 @@ def main(argv=None) -> None:
     for t in wanted:
         path = KOMOOT_DIR / "tours" / f"{t['id']}.json"
         cached = read_json(path)
-        if cached and not args.refresh and not cached.get("incomplete") \
-                and cached.get("changed_at") == t.get("changed_at"):
+        if not args.refresh and not needs_fetch(cached, t):
             continue
         coords = fetch_coordinates(session, t["id"], auth)
         time.sleep(0.3)

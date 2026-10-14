@@ -1,5 +1,5 @@
 @echo off
-rem Usage: hike komoot / youtube / new / fetch / build / serve
+rem Usage: hike komoot / youtube / new / fetch / build / serve / status
 setlocal
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8

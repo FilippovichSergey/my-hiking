@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 
 import requests
 
-from common import CACHE, read_json, write_json
+from common import CACHE, load_yaml, read_json, write_json
 
 # Рэгіёны Грузіі па кодзе ISO 3166-2 (Nominatim часта не мае беларускіх назваў): беларуская, англійская, руская.
 REGIONS = {
@@ -137,6 +138,56 @@ def place_names(lat: float, lng: float) -> dict | None:
         cache[key] = entry
         write_json(GEOCODE_CACHE, cache)
     return entry
+
+
+# --- Свае назвы населеных пунктаў (content/places.yaml) -------------------------
+
+def place_dictionary(path: Path) -> dict:
+    """Слоўнік назваў населеных пунктаў: {назва з OpenStreetMap малымі літарамі: {be, ru}}.
+
+    У файле злева — назва, якую сайт паказвае па-англійску (яна з OpenStreetMap), справа — беларуская назва
+    радком або {be: …, ru: …}. Пусты запіс — яшчэ не запоўнены; няправільны прапускаецца з папярэджаннем.
+    """
+    if not path.exists():
+        return {}
+    found = {}
+    for key, value in load_yaml(path).items():
+        if value is None or value == "":
+            continue
+        entry = {"be": value} if isinstance(value, str) else value
+        if (not isinstance(entry, dict) or not entry or set(entry) - {"be", "ru"}
+                or not all(isinstance(text, str) and text.strip() for text in entry.values())):
+            print(f"  ! {path.name}: «{key}» — чакаецца назва ў двукоссі або {{be: …, ru: …}}; запіс прапушчаны")
+            continue
+        found[str(key).strip().lower()] = {lang: text.strip() for lang, text in entry.items()}
+    return found
+
+
+def place_label(names, dictionary: dict) -> dict | None:
+    """Назва населенага пункта для сайта {be, en[, ru]}: назвы з OpenStreetMap, а дзе ёсць — са свайго слоўніка.
+
+    names — запіс з кэша геакадавання або ўжо апублікаваная назва (англійская ў абодвух тая ж: па ёй і шукаецца
+    запіс слоўніка). None — назвы няма.
+    """
+    if not isinstance(names, dict) or not any(names.get(lang) for lang in ("be", "en", "ru")):
+        return None
+    en = names.get("en") or names.get("be") or ""
+    own = dictionary.get(str(en).strip().lower(), {})
+    place = {"be": own.get("be") or names.get("be") or en, "en": en}
+    if own.get("ru") or names.get("ru"):
+        place["ru"] = own.get("ru") or names["ru"]
+    return place
+
+
+def named_place(names, dictionary: dict) -> dict:
+    """Палі назвы для старту або фінішу: `place` — што паказвае сайт; `placeOsm` — назва з OpenStreetMap, калі свой
+    слоўнік яе змяніў. Па ёй наступная зборка накладвае слоўнік нанова і без кэша: запіс, прыбраны са слоўніка,
+    больш не дзейнічае. Пуста — назвы няма."""
+    osm = place_label(names, {})
+    if osm is None:
+        return {}
+    place = place_label(names, dictionary)
+    return {"place": place, **({"placeOsm": osm} if place != osm else {})}
 
 
 # --- Геаметрыя ---------------------------------------------------------------

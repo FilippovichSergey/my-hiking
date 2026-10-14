@@ -17,13 +17,14 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from PIL import Image, ImageOps
 
 import pages
 import practical
 from common import (CACHE, CONTENT, DOCS, has_track, iso_date, lat_lng, load_config, photo_name, read_version, load_yaml, read_json, site_photos_dir, slugify,
                     text_pair, tour_local_datetime, write_json)
-from geo import haversine, names_key, region_with_ru, simplify
+from geo import haversine, named_place, names_key, place_dictionary, region_with_ru, simplify
 
 PILLOW_EXT = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 MAGICK_EXT = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
@@ -274,6 +275,36 @@ def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set,
     return {"mtime": None, "size": None, "name": name, "w": w, "h": h, "taken": "", "gps": None, "restored": True}
 
 
+def photo_sources(src_dir: Path) -> list[Path]:
+    """Фота паходу ў тэчцы «Сайт». RAW/HEIC побач з гатовай копіяй (IMG_1.CR3 + IMG_1.jpg) — адно фота: бярэцца
+    гатовая копія. Гатовыя файлы з адным імем (A.jpg і A.png) — розныя фота."""
+    files = [f for f in sorted(src_dir.iterdir()) if f.is_file() and f.suffix.lower() in PILLOW_EXT | MAGICK_EXT]
+    ready = {f.stem.lower() for f in files if f.suffix.lower() in PILLOW_EXT}
+    return [f for f in files if f.suffix.lower() in PILLOW_EXT or f.stem.lower() not in ready]
+
+
+def photos_changed(slug: str, h: dict, cfg: dict, site: dict | None) -> bool | None:
+    """Ці трэба перасабраць фота паходу. None — невядома: тэчка з фота недаступная. site — запіс паходу на сайце.
+
+    Трэба, калі ў тэчцы ёсць новыя, змененыя або выдаленыя фота — паводле таго ж, па чым зборка вырашае, ці
+    пераціскаць фота (імя, час змены і памер файла), — або калі вынік апрацоўкі яшчэ не на сайце: маніфест фота
+    запісваецца раней за індэкс, і зборка магла спыніцца паміж імі; апублікаваныя копіі маглі быць страчаны.
+    """
+    folder, root = h.get("photos_folder"), cfg.get("photos_root")
+    if not folder:
+        return False
+    if not root or not (Path(root) / str(folder)).is_dir():
+        return None
+    src_dir = site_photos_dir(Path(root) / str(folder), cfg)
+    seen = {f.name: (st.st_mtime, st.st_size) for f in (photo_sources(src_dir) if src_dir else []) for st in [f.stat()]}
+    manifest = read_manifest(slug)
+    if seen != {key: (m.get("mtime"), m.get("size")) for key, m in manifest.items()}:
+        return True
+    names = {m.get("name") for m in manifest.values()}
+    out_dir = DOCS / "photos" / slug
+    return names != {photo_name(p) for p in (site or {}).get("photos") or []} or not all(_pair_exists(out_dir, n) for n in names)
+
+
 def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, force: bool,
                  pending: list | None = None, prev: dict | None = None, clock=None):
     """Вяртае (photos, cover_index, gps_першага_фота_з_GPS).
@@ -288,18 +319,18 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
     old_manifest = read_manifest(slug)
     manifest = {} if force else dict(old_manifest)  # --force толькі адключае пропуск пераканвертацыі
     if not src_dir:
+        # Падтэчку «Сайт» або поле photos_folder прыбралі: фота з сайта прыбіраюцца. Разам з імі чысціцца кэш
+        # апрацоўкі, інакш запіс практычнай часткі з `photo:` атрымаў бы месца па фота, якога ўжо няма, а
+        # `hike status` бясконца раіў бы зборку. Недаступны дыск сюды не трапляе: тады фота застаюцца ранейшыя.
+        if old_manifest:
+            write_json(manifest_path, {})
         if out_dir.exists():
             obsolete.append(out_dir)
         if pending is None:
             _remove(obsolete)
         return [], 0, None
 
-    files = [f for f in sorted(src_dir.iterdir()) if f.is_file() and f.suffix.lower() in PILLOW_EXT | MAGICK_EXT]
-    # RAW/HEIC побач з гатовай копіяй (IMG_1.CR3 + IMG_1.jpg) — адно фота: бярэцца гатовая копія.
-    # Гатовыя файлы з адным імем (A.jpg і A.png) — розныя фота.
-    ready = {f.stem.lower() for f in files if f.suffix.lower() in PILLOW_EXT}
-    sources = [f for f in files if f.suffix.lower() in PILLOW_EXT or f.stem.lower() not in ready]
-
+    sources = photo_sources(src_dir)
     prev_names = [photo_name(p) for p in (prev or {}).get("photos") or []]
     pc = cfg["photo"]
     entries, run_used, protect = [], set(), set()
@@ -531,6 +562,95 @@ def calculated_facts(prev: dict) -> dict | None:
     return pure
 
 
+def with_own_places(item: dict | None, own_places: dict) -> dict | None:
+    """Ранейшы разлік па трэку з назвамі старту і фінішу паводле свайго слоўніка: ён дзейнічае і без трэку.
+
+    Слоўнік накладваецца на назву з OpenStreetMap (`placeOsm`, калі ранейшая зборка яе замяніла), а не на ранейшую
+    сваю назву: запіс, прыбраны са слоўніка, больш не дзейнічае.
+    """
+    if not item:
+        return item
+    edges = {}
+    for edge in ("start", "finish"):
+        was = item.get(edge)
+        if isinstance(was, dict) and was.get("place"):
+            rest = {k: v for k, v in was.items() if k not in ("place", "placeOsm")}
+            edges[edge] = {**rest, **(named_place(was.get("placeOsm") or was["place"], own_places) or {"place": was["place"]})}
+    return {**item, **edges}
+
+
+def tour_state(tour_ids: list, prev: dict | None) -> tuple[list, list, bool]:
+    """Туры паходу ў кэшы: (якіх няма, якія без каардынат, ці застаецца ранейшы апублікаваны трэк).
+
+    Адсутны файл тура або тур без каардынат (няпоўны адказ Komoot) не выдаляе апублікаваны трэк.
+    """
+    cached = {t: read_json(CACHE / "komoot" / "tours" / f"{t}.json") for t in tour_ids}
+    missing = [t for t, tour in cached.items() if not tour]
+    empty = [t for t, tour in cached.items() if tour and not has_track(tour.get("coords"))]
+    kept = bool((missing or empty) and prev and prev.get("track") and (DOCS / prev["track"]).exists())
+    return missing, empty, kept
+
+
+def shared_sources(cfg: dict) -> dict:
+    """Тое, з чаго збіраюцца ўсе паходы, апрача іх уласных файлаў: налады, метаданыя тураў, спіс відэа, курсы лары,
+    дарогі на машыне, назвы населеных пунктаў (`hike komoot`, `hike youtube`, `hike fetch`) і свой слоўнік назваў."""
+    return {
+        "cfg": cfg,
+        "tours": {int(t["id"]): t for t in read_json(CACHE / "komoot" / "tours.json", [])},
+        "videos": {v["id"]: v for v in read_json(CACHE / "youtube.json", [])},
+        "rates": read_json(CACHE / "rates.json", {}).get("USD") or {},  # лары за 1 даляр па датах
+        "routes": read_json(CACHE / "routes.json", {}).get("routes") or {},
+        "names": read_json(CACHE / "geocode.json", {}),
+        "own": place_dictionary(CONTENT.parent / "places.yaml"),
+    }
+
+
+def place_sources(raw: list[dict], prev: dict | None, place_cache: dict) -> list:
+    """Назвы з OpenStreetMap для старту і фінішу кожнага дня — тое, на што накладваецца свой слоўнік.
+
+    З пунктамі трэку — з кэша геакадавання; калі застаецца ранейшы трэк (prev) — з папярэдняга індэкса.
+    """
+    if raw:
+        return [place_cache.get(names_key(p[0], p[1])) for day in raw
+                for p in (practical._points(day)[0], practical._points(day)[-1])]
+    items = [(prev or {}).get("facts") or {}] + [d.get("facts") or {} for d in (prev or {}).get("days") or []]
+    edges = [item.get(edge) for item in items for edge in ("start", "finish")]
+    return [edge.get("placeOsm") or edge.get("place") if isinstance(edge, dict) else None for edge in edges]
+
+
+def inputs_key(slug: str, h: dict, tour_ids: list, raw: list[dict], prev: dict | None, shared: dict) -> str:
+    """Подпіс усяго, з чаго збіраецца запіс паходу, апрача саміх фота: файл паходу, туры, кэш сэрвісаў, свой слоўнік
+    назваў і налады. Па ім `hike status` бачыць, што пасля апошняй зборкі нешта з гэтага змянілася.
+
+    raw — пункты трэку; пуста, калі тура няма ў кэшы. Калі пры гэтым застаецца ранейшы трэк, prev — запіс паходу
+    з індэкса сайта (інакш None).
+    """
+    def digest(path: Path):
+        return hashlib.sha1(path.read_bytes()).hexdigest() if path.is_file() else None
+
+    home = practical.home_point(shared["cfg"].get("home"))
+    places = place_sources(raw, prev, shared["names"])
+    named = sorted({str(n.get("en") or n.get("be") or "").strip().lower() for n in places if isinstance(n, dict)})
+    block = h.get("practical") if isinstance(h.get("practical"), dict) else {}
+    ways = block.get("getting_there") if isinstance(block.get("getting_there"), list) else []
+    # курс лары патрэбны на даты цэн, а без даты — на дзень пачатку паходу: бяруцца ўсе даты, якія могуць ім быць
+    dates = {iso_date(w["date"]) for w in ways if isinstance(w, dict) and w.get("date")}
+    dates |= {d.get("date") for d in raw or (prev or {}).get("days") or []} | {iso_date(h["date"]) if h.get("date") else None}
+    videos = h.get("youtube") if isinstance(h.get("youtube"), list) else []
+    drive = practical.drive_targets(raw).items() if home else ()
+    parts = {
+        "hike": yaml.safe_dump(h, allow_unicode=True, sort_keys=False),
+        "tours": {str(t): [digest(CACHE / "komoot" / "tours" / f"{t}.json"), shared["tours"].get(t)] for t in tour_ids},
+        "weather": digest(CACHE / "weather" / f"{slug}.json"), "osm": digest(CACHE / "osm" / f"{slug}.json"),
+        "routes": {key: shared["routes"].get(key) for key in (practical.drive_key(home, target, name == "back") for name, target in drive)},
+        "places": places, "own": {name: shared["own"].get(name) for name in named},
+        "rates": {day: shared["rates"].get(day) for day in sorted(d for d in dates if d)},
+        "videos": {str(v): (shared["videos"].get(v) or {}).get("title") for v in videos},
+        "config": shared["cfg"],
+    }
+    return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()[:12]
+
+
 def unique_tours(slug: str, raw) -> list:
     """Туры з поля `komoot:` без паўтораў (у ранейшым парадку): паўтор падвоіў бы трэк і статыстыку."""
     seen, tours = set(), []
@@ -587,8 +707,6 @@ def main(argv=None) -> None:
     cfg = load_config()
     photos_root = Path(cfg["photos_root"])
     offset = cfg.get("default_utc_offset", 0)
-    tours_meta = {int(t["id"]): t for t in read_json(CACHE / "komoot" / "tours.json", [])}
-    videos_by_id = {v["id"]: v for v in read_json(CACHE / "youtube.json", [])}
     published = read_json(DOCS / "data" / "hikes.json", None) or {}
     previous = {ph["slug"]: ph for ph in published.get("hikes", [])}
     pending: list[Path] = []  # састарэлыя файлы выдаляюцца толькі пасля запісу новага індэкса
@@ -598,9 +716,9 @@ def main(argv=None) -> None:
 
     # Усе апісанні чытаюцца да пачатку працы: памылка ў адным файле спыняе зборку, пакуль нічога не зменена.
     sources = [(path.stem, load_yaml(path)) for path in sorted(CONTENT.glob("*.yaml"))]
-    usd_rates = read_json(CACHE / "rates.json", {}).get("USD") or {}  # лары за 1 даляр па датах (`hike fetch`)
-    drive_routes = read_json(CACHE / "routes.json", {}).get("routes") or {}  # дарога на машыне ад home
-    place_cache = read_json(CACHE / "geocode.json", {})                      # назвы населеных пунктаў
+    shared = shared_sources(cfg)
+    tours_meta, videos_by_id, usd_rates = shared["tours"], shared["videos"], shared["rates"]
+    drive_routes, place_cache, own_places = shared["routes"], shared["names"], shared["own"]
     no_weather: set[str] = set()
     no_services: set[str] = set()
     hikes = []
@@ -610,21 +728,21 @@ def main(argv=None) -> None:
         print(f"• {slug}")
         prev = previous.get(slug)
         tour_ids = unique_tours(slug, h.get("komoot"))
-        cached = {t: read_json(CACHE / "komoot" / "tours" / f"{t}.json") for t in tour_ids}
-        missing = [t for t, tour in cached.items() if not tour]
-        empty = [t for t, tour in cached.items() if tour and not has_track(tour.get("coords"))]
-        if (missing or empty) and prev and prev.get("track") and (DOCS / prev["track"]).exists():
-            # Адсутны файл тура або тур без каардынат (няпоўны адказ Komoot) не выдаляе апублікаваны трэк.
+        missing, empty, kept_track = tour_state(tour_ids, prev)
+        if kept_track:
             what = " і ".join(w for w in (f"няма тураў {missing}" if missing else "",
                                           f"туры {empty} без каардынат" if empty else "") if w)
             print(f"  ! {slug}: у кэшы {what} — застаецца апублікаваны раней трэк "
                   f"(запусціце `hike komoot{' --refresh' if empty else ''}`)")
             # Геаметрыя ранейшая, а спасылкі — толькі на туры, якія дагэтуль публічныя.
             days, lines, track = current_links(prev["days"], tours_meta), prev["lines"], prev["track"]
-            raw, facts, kept_track = [], calculated_facts(prev), True  # разлік па трэку — таксама ранейшы
+            raw, facts = [], calculated_facts(prev)  # разлік па трэку — таксама ранейшы
+            # Назвы населеных пунктаў — ранейшыя, але са свайго слоўніка яны бяруцца і без трэку.
+            facts = with_own_places(facts, own_places)
+            days = [{**d, "facts": with_own_places(d["facts"], own_places)} if d.get("facts") else d for d in days]
         else:
             days, lines, track = build_tracks(slug, tour_ids, offset, tours_meta)
-            raw, facts, kept_track = practical.raw_days(tour_ids, offset), None, False
+            raw, facts = practical.raw_days(tour_ids, offset), None
         stats = {
             "distance": round(sum(d["distance"] for d in days), 2),
             "up": sum(d["up"] for d in days),
@@ -648,12 +766,7 @@ def main(argv=None) -> None:
             # Назвы населеных пунктаў каля старту і фінішу — з таго, што спампаваў `hike fetch`.
             for item, first, last in [(facts, raw[0], raw[-1])] + [(d["facts"], r, r) for d, r in zip(days, raw)]:
                 for edge, p in (("start", practical._points(first)[0]), ("finish", practical._points(last)[-1])):
-                    names = place_cache.get(names_key(p[0], p[1]))
-                    if isinstance(names, dict) and any(names.get(lang) for lang in ("be", "en", "ru")):
-                        place = {"be": names.get("be") or names.get("en") or "", "en": names.get("en") or names.get("be") or ""}
-                        if names.get("ru"):
-                            place["ru"] = names["ru"]
-                        item[edge] = {**item[edge], "place": place}
+                    item[edge] = {**item[edge], **named_place(place_cache.get(names_key(p[0], p[1])), own_places)}
 
         start, end = hike_dates(slug, h.get("date"), h.get("end"), days)
         if not start:
@@ -775,6 +888,7 @@ def main(argv=None) -> None:
             **({"photoKey": places_key} if photos and places_key else {}),  # подпіс трэку і photo_clock для месцаў фота
             "videos": videos,
             "impressions": text_pair(h.get("impressions")),
+            "inputs": inputs_key(slug, h, tour_ids, raw, prev if kept_track else None, shared),  # для `hike status`
         })
 
     slugs = {h["slug"] for h in hikes}
