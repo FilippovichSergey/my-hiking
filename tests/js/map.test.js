@@ -93,3 +93,76 @@ test("фота на карце: значкі, аб'яднанне блізкіх
   assert.equal(pins().length, 0);
   assert.equal(maplibregl.Popup.open, null);
 });
+
+test("пераключальнікі «Фота» і «Падказкі»: хаваюць значкі і запамінаюць выбар", async () => {
+  localStorage.clear();
+  maplibregl.Marker.all = [];
+  const el = document.getElementById("map");
+  el.replaceChildren();
+  const map = createMap(el, { onSelect() {} });
+  await tick();
+  map.updateControls();
+  const ctl = () => el.querySelector(".map-marks");
+  const button = (text) => [...ctl().querySelectorAll("button")].find((b) => b.textContent === text);
+  const shown = () => [...ctl().querySelectorAll("button")].filter((b) => !b.hidden).map((b) => `${b.textContent}: ${b.getAttribute("aria-pressed")}`);
+  const marks = () => maplibregl.Marker.all.map((m) => m.element.className).sort();
+  const poi = (kind, type, hint, lng) => ({ kind, type, hint, at: [lng, 41], day: 0, km: 1, title: hint ? "Падказка" : "Запіс аўтара", where: "1 км ад старту", source: "крыніца" });
+  assert.equal(ctl().hidden, true, "паход не адкрыты — пераключальнікаў няма");
+
+  // адкрыты паход: запіс аўтара, дзве падказкі OpenStreetMap і фота
+  map.setPois([poi("water", "spring", false, 42), poi("water", "spring", true, 42.1), poi("place", "shelter", true, 42.2)]);
+  map.setPhotos([photo(0, 42.5, 41)], () => {});
+  assert.equal(ctl().hidden, false);
+  assert.deepEqual(shown(), ["Фота: true", "Падказкі: true"]);
+  assert.deepEqual(marks(), ["photo-pin", "poi poi-place poi-hint", "poi poi-water", "poi poi-water poi-hint"]);
+
+  // «Падказкі» выключаны: застаюцца запісы аўтара і фота; адкрытая падказка закрываецца
+  maplibregl.Marker.all.find((m) => m.element.classList.contains("poi-hint")).element.click();
+  assert.notEqual(maplibregl.Popup.open, null);
+  button("Падказкі").click();
+  assert.deepEqual(shown(), ["Фота: true", "Падказкі: false"]);
+  assert.deepEqual(marks(), ["photo-pin", "poi poi-water"]);
+  assert.equal(maplibregl.Popup.open, null);
+  assert.equal(localStorage.getItem("map-hints"), "0");
+  // «Фота» выключаны: застаецца толькі трэк са сваімі запісамі; акенца з фота закрываецца
+  maplibregl.Marker.all.find((m) => m.element.classList.contains("photo-pin")).element.click();
+  assert.notEqual(maplibregl.Popup.open, null);
+  button("Фота").click();
+  assert.deepEqual(shown(), ["Фота: false", "Падказкі: false"]);
+  assert.deepEqual(marks(), ["poi poi-water"]);
+  assert.equal(maplibregl.Popup.open, null);
+  assert.equal(localStorage.getItem("map-photos"), "0");
+  // набліжэнне карты выключаныя значкі не вяртае
+  FakeMap.last.zoom = 15;
+  FakeMap.last.fire("zoomend");
+  assert.deepEqual(marks(), ["poi poi-water"]);
+
+  // іншы паход, у якога падказак няма: кнопкі «Падказкі» няма, выбар «Фота» той самы
+  map.setPois([poi("water", "tap", false, 43)]);
+  map.setPhotos([photo(0, 43, 41), photo(1, 43.5, 41)], () => {});
+  assert.deepEqual(shown(), ["Фота: false"]);
+  assert.deepEqual(marks(), ["poi poi-water"]);
+  button("Фота").click();
+  assert.deepEqual(shown(), ["Фота: true"]);
+  assert.deepEqual(marks(), ["photo-pin", "photo-pin", "poi poi-water"]);
+  assert.equal(localStorage.getItem("map-photos"), "1");
+  // паход без фота з месцам і без падказак, а потым спіс паходаў: пераключальнікаў няма
+  map.setPhotos([], null);
+  assert.equal(ctl().hidden, true);
+  map.setPois([poi("place", "shelter", true, 43)]);
+  assert.deepEqual([ctl().hidden, shown(), marks()], [false, ["Падказкі: false"], []]);
+  map.clearSelection();
+  assert.equal(ctl().hidden, true);
+
+  // выбар перажывае перазагрузку старонкі: новая карта чытае яго з памяці браўзера
+  el.replaceChildren();
+  maplibregl.Marker.all = [];
+  const next = createMap(el, { onSelect() {} });
+  await tick();
+  next.setPois([poi("water", "spring", false, 42), poi("place", "shelter", true, 42.2)]);
+  next.setPhotos([photo(0, 42.5, 41)], () => {});
+  assert.deepEqual(shown(), ["Фота: true", "Падказкі: false"]);
+  assert.deepEqual(marks(), ["photo-pin", "poi poi-water"]);
+  button("Падказкі").click();
+  assert.deepEqual(marks(), ["photo-pin", "poi poi-place poi-hint", "poi poi-water"]);
+});

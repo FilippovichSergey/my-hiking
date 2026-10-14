@@ -397,13 +397,20 @@ DRIVE_BACK_M = 2000                  # фініш далей за гэта ад 
 
 
 def osm_bbox(days: list[dict]) -> list[float] | None:
-    """[поўдзень, захад, поўнач, усход] трэку з запасам — вобласць пошуку ў OpenStreetMap."""
+    """[поўдзень, захад, поўнач, усход] трэку з запасам — вобласць пошуку ў OpenStreetMap.
+
+    Запас — 0,004° (па шыраце каля 440 м), але не менш, чым трэба, каб у вобласць трапіла ўсё бліжэй за OSM_WATER_M
+    ад трэку: градус даўгаты тым карацейшы, чым далей ад экватара (на 70° — каля 38 км). Межы акругляюцца да
+    0,001°, таму да запасу дададзена і гэтая палова тысячнай. Для шырот Грузіі вобласць — ранейшая.
+    """
     pts = [p for day in days for p in _points(day)]
     if not pts:
         return None
-    pad = 0.004  # каля 400 м
-    return [round(min(p[0] for p in pts) - pad, 3), round(min(p[1] for p in pts) - pad, 3),
-            round(max(p[0] for p in pts) + pad, 3), round(max(p[1] for p in pts) + pad, 3)]
+    lat_pad = 0.004
+    widest = max(abs(p[0]) for p in pts)
+    lng_pad = max(lat_pad, OSM_WATER_M / (math.pi / 180 * EARTH_R * max(math.cos(math.radians(widest)), 0.01)) + 0.0005)
+    return [round(min(p[0] for p in pts) - lat_pad, 3), round(min(p[1] for p in pts) - lng_pad, 3),
+            round(max(p[0] for p in pts) + lat_pad, 3), round(max(p[1] for p in pts) + lng_pad, 3)]
 
 
 OSM_FORMAT = 2  # змяняецца разам з правіламі адбору ў osm_item: аб'екты адбіраюцца пры спампоўцы
@@ -562,6 +569,91 @@ def drive_info(routes: dict, home, days: list[dict]) -> dict | None:
     if "to" not in found:
         return None
     return {"from": _text(home.get("name"), "home.name", lambda message: None), **found}
+
+
+# --- Паходы ў тое самае месца ---------------------------------------------------------
+
+RELATED_NEAR_M = 150   # «па тым жа шляху» — не далей за гэта ад трэку другога паходу
+RELATED_STEP_M = 50    # шлях параўноўваецца кавалкамі не даўжэй за гэта
+RELATED_SHARE = 0.5    # звязаныя, калі не менш за палову шляху аднаго з двух паходаў ідзе па трэку другога
+
+
+def related_hikes(hikes: list[dict]) -> dict[str, list[str]]:
+    """Іншыя паходы ў тое самае месца для кожнага паходу: {slug: [slug, …]}, найноўшыя першымі.
+
+    Гэта паходы з той жа беларускай назвай (мэта тая ж, нават калі шлях іншы) і паходы, у якіх не менш за палову
+    шляху аднаго з двух ідзе па трэку другога: кароткі паход на гару цалкам ляжыць на маршруце доўгага праз яе.
+    Параўноўваюцца лініі трэкаў з індэкса сайта (`lines`, пункты [даўгата, шырата]).
+    """
+    def flat(lines: list, cos0: float) -> list:
+        return [[(math.radians(p[0]) * EARTH_R * cos0, math.radians(p[1]) * EARTH_R) for p in line] for line in lines]
+
+    def pieces(lines: list) -> list:
+        """Шлях кавалкамі не даўжэй за RELATED_STEP_M: (сярэдзіна кавалка, яго даўжыня ў метрах).
+
+        Кожны кавалак важыць столькі, колькі ён доўгі: шлях, запісаны некалькімі кароткімі турамі, дае тую ж
+        долю, што і адзін тур. Паміж лініямі (турамі) шляху няма, адрэзак нулявой даўжыні вагі не мае.
+        """
+        found = []
+        for line in lines:
+            for a, b in zip(line, line[1:]):
+                length = math.dist(a, b)
+                count = math.ceil(length / RELATED_STEP_M)
+                found += [((a[0] + (b[0] - a[0]) * (i + 0.5) / count, a[1] + (b[1] - a[1]) * (i + 0.5) / count), length / count)
+                          for i in range(count)]
+        return found
+
+    def grid(lines: list) -> dict:
+        """Адрэзкі ліній па клетках: у клетцы пункта ёсць усе адрэзкі, якія могуць быць да яго бліжэй за RELATED_NEAR_M."""
+        cells: dict[tuple, list] = {}
+        size = 2 * RELATED_NEAR_M
+        for line in lines:
+            for a, b in zip(line, line[1:] or line):
+                for cx in range(int((min(a[0], b[0]) - RELATED_NEAR_M) // size), int((max(a[0], b[0]) + RELATED_NEAR_M) // size) + 1):
+                    for cy in range(int((min(a[1], b[1]) - RELATED_NEAR_M) // size), int((max(a[1], b[1]) + RELATED_NEAR_M) // size) + 1):
+                        cells.setdefault((cx, cy), []).append((a, b))
+        return cells
+
+    def near(p: tuple, a: tuple, b: tuple) -> bool:
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length2 = dx * dx + dy * dy
+        part = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2)) if length2 else 0.0
+        return (p[0] - a[0] - part * dx) ** 2 + (p[1] - a[1] - part * dy) ** 2 <= RELATED_NEAR_M ** 2
+
+    def share(parts: list, cells: dict) -> float:
+        """Доля шляху (па даўжыні), якая ляжыць каля ліній другога паходу."""
+        size = 2 * RELATED_NEAR_M
+        total = sum(length for _, length in parts)
+        hits = sum(length for p, length in parts
+                   if any(near(p, a, b) for a, b in cells.get((int(p[0] // size), int(p[1] // size)), ())))
+        return hits / total if total else 0.0
+
+    def apart(box: list, other: list) -> bool:
+        """Прамавугольнікі трэкаў так далёка, што ніводзін пункт аднаго не бліжэй за RELATED_NEAR_M да другога.
+        Запас па даўгаце — для шыраты, дзе градус даўгаты карацейшы за ўсё (бліжэй да полюса)."""
+        lat_pad = RELATED_NEAR_M / (math.pi / 180 * EARTH_R) * 1.5  # з запасам на акругленне каардынат
+        widest = max(abs(box[1]), abs(box[3]), abs(other[1]), abs(other[3]))
+        lng_pad = lat_pad / max(math.cos(math.radians(widest)), 1e-6)
+        return (box[2] + lng_pad < other[0] or other[2] + lng_pad < box[0]
+                or box[3] + lat_pad < other[1] or other[3] + lat_pad < box[1])
+
+    def same_way(a: dict, b: dict) -> bool:
+        box, other = a.get("bbox"), b.get("bbox")
+        if not (a.get("lines") and b.get("lines") and box and other) or apart(box, other):
+            return False
+        cos0 = math.cos(math.radians((box[1] + box[3]) / 2))
+        one, two = flat(a["lines"], cos0), flat(b["lines"], cos0)
+        return max(share(pieces(one), grid(two)), share(pieces(two), grid(one))) >= RELATED_SHARE
+
+    name = lambda h: str((h.get("title") or {}).get("be") or "").strip().casefold()  # noqa: E731
+    found: dict[str, list[dict]] = {h["slug"]: [] for h in hikes}
+    for i, a in enumerate(hikes):
+        for b in hikes[i + 1:]:
+            if (name(a) and name(a) == name(b)) or same_way(a, b):
+                found[a["slug"]].append(b)
+                found[b["slug"]].append(a)
+    return {slug: [h["slug"] for h in sorted(others, key=lambda h: (h.get("date") or "", h["slug"]), reverse=True)]
+            for slug, others in found.items()}
 
 
 # --- Месца на трэку -----------------------------------------------------------------

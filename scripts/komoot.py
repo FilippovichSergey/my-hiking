@@ -117,6 +117,9 @@ def main(argv=None) -> None:
         print(f"  ↓ {t['date'][:10]}  {t['name']}  ({len(coords)} кропак)")
     print(f"Хайкінг-тураў: {len(wanted)}, спампавана трэкаў: {fetched}"
           + (f", без каардынат: {failed}" if failed else "") + ". Гатова → cache/komoot/")
+    if failed:
+        # Добры ранейшы трэк застаўся ў кэшы, але абнаўленне не скончана: код выхаду 1, каб запуск паўтарылі.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

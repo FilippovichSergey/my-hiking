@@ -140,7 +140,9 @@ def needs(slug: str, h: dict, days: list[dict], start: str | None, home, routes:
         if not points:
             continue  # у трэку няма часу (імпартаваны GPX): невядома, калі аўтар быў у пунктах
         key, have = practical.weather_key(points), cached.get(day["date"])
-        weather.append((day["date"], points, key, bool(have and have.get("key") == key and have.get("complete"))))
+        # `retry` — мінулы раз сэрвіс аддаў няпоўны адказ і засталіся ранейшыя поўныя звесткі: абнаўленне не скончана
+        weather.append((day["date"], points, key,
+                        bool(have and have.get("key") == key and have.get("complete") and not have.get("retry"))))
     bbox = practical.osm_bbox(days)
     osm = (bbox, read_json(CACHE / "osm" / f"{slug}.json", {}).get("key") == practical.osm_key(bbox)) if bbox else None
     drive = [(name, target, key, key in routes) for name, target in (practical.drive_targets(days).items() if home else ())
@@ -171,7 +173,7 @@ def main(argv=None) -> None:
     today = date.today().isoformat()
     silent = io.StringIO()  # папярэджанні пра туры і даты паказвае `hike build`
 
-    fetched = failed = 0
+    fetched = failed = partial = 0
     usd_known = read_json(CACHE / "rates.json", {}).get("USD") or {}
     rate_days: set[str] = set()
     for path in sorted(CONTENT.glob("*.yaml")):
@@ -198,8 +200,17 @@ def main(argv=None) -> None:
                 failed += 1
                 print(f"  ! {slug}, {day_date}: надвор'е не атрымана — {exc}")
                 continue  # ранейшыя звесткі застаюцца
+            old = cached.get(day_date) or {}
+            if not weather["complete"] and old.get("key") == key and old.get("complete"):
+                # Няпоўны адказ не замяняе поўныя звесткі для таго ж трэку (напрыклад, пры --refresh): яны
+                # застаюцца, а дзень пазначаецца, каб наступны `hike fetch` паспрабаваў абнавіць яго зноў.
+                fresh[day_date] = {**old, "retry": True}
+                partial += 1
+                print(f"  ! {slug}, {day_date}: надвор'е прыйшло няпоўным — застаюцца ранейшыя поўныя звесткі")
+                continue
             fresh[day_date] = {"key": key, "fetched": today, **weather}
             fetched += 1
+            partial += not weather["complete"]
             note = "" if weather["complete"] else " (няпоўныя звесткі — паспрабуйце пазней)"
             print(f"  ↓ {day_date}  {slug}: надвор'е для {len(points)} пунктаў{note}")
             time.sleep(0.2)
@@ -284,7 +295,12 @@ def main(argv=None) -> None:
 
     print(f"Надвор'е: спампавана дзён {fetched}. Курсаў: {got}. OpenStreetMap: паходаў {hints}. "
           f"Маршрутаў на машыне: {drives}. Назваў месцаў: {places}."
-          + (f" Не атрымана: {failed}." if failed else "") + " Гатова → cache/. Далей: hike build")
+          + (f" Не атрымана: {failed}." if failed else "") + (f" Няпоўных адказаў: {partial}." if partial else "")
+          + " Гатова → cache/. Далей: hike build")
+    if failed or partial:
+        # Атрыманае ўжо захавана, ранейшыя звесткі не страчаны. Код выхаду 1 — каб скрыпт або планавальнік
+        # бачыў, што абнаўленне не скончана і `hike fetch` трэба паўтарыць.
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

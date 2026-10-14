@@ -14,7 +14,13 @@ export class FakeMap {
     this.handlers = {};
     this.layout = {}; // уласцівасці слаёў, зададзеныя праз setLayoutProperty: { слой: { уласцівасць: значэнне } }
     this.sources = Object.fromEntries(Object.keys(opts.style.sources).map((id) => [id, new FakeSource(id)]));
+    this.container = opts.container;
     setTimeout(() => this.fire("styledata"), 0);
+  }
+  /** Свае кнопкі карты (падкладкі, «Фота», «Падказкі») трапляюць у яе кантэйнер, як у сапраўднай карце. */
+  addControl(control) {
+    const node = control.onAdd?.(this);
+    if (node) this.container.append(node);
   }
   on(type, layerOrFn, fn) { (this.handlers[type] ||= []).push(fn || layerOrFn); }
   off(type, fn) { this.handlers[type] = (this.handlers[type] || []).filter((f) => f !== fn); }
@@ -28,7 +34,7 @@ export class FakeMap {
     const perDegree = (256 * 2 ** this.getZoom()) / 360;
     return { x: lng * perDegree, y: -lat * perDegree };
   }
-  addControl() {} setPaintProperty() {} setFeatureState() {}
+  setPaintProperty() {} setFeatureState() {}
   setLayoutProperty(id, prop, value) { (this.layout[id] ||= {})[prop] = value; }
   fitBounds(...args) { (this.fits ||= []).push(args); }
   flyTo() {} easeTo() {} resize() {} setTerrain() {} setSky() {}

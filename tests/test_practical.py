@@ -5,6 +5,7 @@
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import sys
@@ -825,7 +826,11 @@ class FetchProject(PracticalProject):
         with unittest.mock.patch("requests.Session.get", fake_get), unittest.mock.patch("requests.Session.post", fake_post), \
                 unittest.mock.patch.object(geo, "_nominatim", fake_nominatim), \
                 unittest.mock.patch("time.sleep", lambda *a: None), unittest.mock.patch("sys.stdout", out):
-            fetch.main(list(argv))
+            try:
+                fetch.main(list(argv))
+                self.exit_code = 0
+            except SystemExit as stop:  # штосьці не атрымана: каманда завяршаецца з кодам 1
+                self.exit_code = stop.code
         return calls, out.getvalue()
 
     def hike(self, extra=""):
@@ -3072,7 +3077,11 @@ class TestReview1102(StatusProject):
                 unittest.mock.patch("builtins.input", lambda *a: "e@example.com"), \
                 unittest.mock.patch("getpass.getpass", lambda *a: "p"), \
                 unittest.mock.patch("time.sleep", lambda *a: None), unittest.mock.patch("sys.stdout", out):
-            komoot.main(list(argv))
+            try:
+                komoot.main(list(argv))
+                self.exit_code = 0
+            except SystemExit as stop:
+                self.exit_code = stop.code
         return out.getvalue()
 
     def test_status_asks_for_komoot_until_the_tour_is_really_updated(self):  # №2
@@ -3116,6 +3125,276 @@ class TestReview1102(StatusProject):
         cached = common.read_json(build.CACHE / "komoot" / "tours" / "1.json")
         common.write_json(build.CACHE / "komoot" / "tours" / "1.json", {**cached, "incomplete": True})
         self.assertEqual(self.todo(), [old, BUILD_CHANGED + "h"])
+
+
+class TestRelatedHikes(PracticalProject):
+    """Іншыя паходы ў тое самае месца: з той жа назвай або па тым жа шляху."""
+
+    @staticmethod
+    def entry(slug, day, title, *corners):
+        """Запіс паходу, як у індэксе сайта: лінія трэку [даўгата, шырата] праз вуглы ў метрах ад пачатку."""
+        line = [[lng, lat] for lat, lng in path(*corners)] if corners else []
+        box = [min(p[0] for p in line), min(p[1] for p in line), max(p[0] for p in line), max(p[1] for p in line)] if line else None
+        return {"slug": slug, "date": day, "title": {"be": title, "en": ""}, "lines": [line] if line else [], "bbox": box}
+
+    def test_same_title_or_same_way(self):
+        e = self.entry
+        hikes = [
+            e("square-1", "2025-01-01", "Возера", *SQUARE),
+            e("square-2", "2025-02-01", "Возера, другі раз", *SQUARE),                      # той самы шлях, іншая назва
+            e("side", "2025-03-01", "Заходні бок", (0, 0), (1000, 0), (0, 0)),              # увесь ляжыць на квадраце
+            e("half", "2025-04-01", "Палова", (0, 0), (1000, 0), (1000, -1000)),            # 2 км, з іх 1 км па квадраце
+            e("third", "2025-05-01", "Траціна", (0, 0), (1000, 0), (1000, -2000)),          # 3 км, з іх 1 км па квадраце
+            e("cross", "2025-06-01", "Упоперак", (500, -2000), (500, 3000)),                # толькі перасякае квадрат
+            e("near", "2025-07-01", "Побач", (0, -400), (1000, -400)),                      # паралельна за 400 м
+            e("far", "2025-08-01", " ВОЗЕРА ", (0, 9000), (1000, 9000)),                    # тая ж назва, іншае месца
+            e("no-track", "2025-09-01", "Возера"),                                          # без трэку — толькі па назве
+            e("alone", "2025-10-01", "Асобна", (20000, 0), (21000, 0)),
+            e("untitled-1", "2025-11-01", ""), e("untitled-2", "2025-12-01", ""),           # пустыя назвы не «аднолькавыя»
+        ]
+        related = practical.related_hikes(hikes)
+        self.assertEqual(set(related), {h["slug"] for h in hikes})
+        self.assertEqual(related["square-1"], ["no-track", "far", "half", "side", "square-2"], "найноўшыя першымі")
+        self.assertEqual(related["square-2"], ["half", "side", "square-1"])
+        self.assertEqual(related["side"], ["third", "half", "square-2", "square-1"], "кароткі паход ляжыць на шляху даўжэйшых")
+        self.assertEqual(related["half"], ["third", "side", "square-2", "square-1"], "палова шляху агульная з квадратам")
+        self.assertEqual(related["third"], ["half", "side"],
+                         "з квадратам агульная толькі траціна — не звязаны; «Палова» і «Заходні бок» ляжаць на ім цалкам")
+        self.assertEqual([related[slug] for slug in ("cross", "near", "alone", "untitled-1", "untitled-2")], [[], [], [], [], []])
+        self.assertEqual(related["far"], ["no-track", "square-1"], "назва параўноўваецца без уліку рэгістра і прабелаў")
+        self.assertEqual(related["no-track"], ["far", "square-1"])
+        self.assertEqual(practical.related_hikes([]), {})
+        # парадак паходаў у спісе на вынік не ўплывае
+        self.assertEqual(practical.related_hikes(hikes[::-1]), related)
+        # трэк з некалькіх ліній (два дні) і лінія з аднаго пункта
+        two = {**e("two-days", "2026-01-01", "Два дні", (0, 0), (1000, 0)), "lines": [
+            [[lng, lat] for lat, lng in path((0, 0), (1000, 0))], [[lng, lat] for lat, lng in path((1000, 0), (1000, 1000))], [[42.0, 41.0]]]}
+        self.assertEqual(practical.related_hikes([hikes[0], two])["two-days"], ["square-1"])
+
+    def test_build_writes_related_hikes_to_the_index(self):
+        self.photos_root.mkdir()
+        tours = {"a": (1, "2025-06-01", "Возера", SQUARE), "b": (2, "2025-07-01", "Возера, другі раз", SQUARE),
+                 "c": (3, "2025-08-01", "Іншае", [(20000, 0), (21000, 0)]), "d": (4, "2025-09-01", "Возера", [(40000, 0), (41000, 0)])}
+        for slug, (tid, day, title, corners) in tours.items():
+            self.add_tour(tid, f"{day}T04:00:00Z", path(*corners))
+            (self.content / f"{slug}.yaml").write_text(f"date: {day}\ntitle: {{be: \"{title}\"}}\nkomoot: [{tid}]\n", encoding="utf-8")
+        (self.content / "hidden.yaml").write_text("date: 2025-10-01\ntitle: {be: Возера}\nkomoot: [1]\nhidden: true\n", encoding="utf-8")
+        index = self.build()[0]
+        self.assertEqual({slug: h.get("related") for slug, h in index.items()},
+                         {"a": ["d", "b"], "b": ["a"], "c": None, "d": ["a"]}, "схаваны паход у спасылкі не трапляе")
+        # тура няма ў кэшы: застаецца ранейшы трэк — і спасылкі па ім
+        (build.CACHE / "komoot" / "tours" / "2.json").unlink()
+        index, out = self.build()
+        self.assertIn("застаецца апублікаваны раней трэк", out)
+        self.assertEqual((index["a"]["related"], index["b"]["related"]), (["d", "b"], ["a"]))
+        # паход перайменавалі і перанеслі ў іншае месца: спасылкі знікаюць у абодвух
+        self.add_tour(4, "2025-09-01T04:00:00Z", path((40000, 0), (41000, 0)))
+        (self.content / "d.yaml").write_text("date: 2025-09-01\ntitle: {be: Гара}\nkomoot: [4]\n", encoding="utf-8")
+        index = self.build()[0]
+        self.assertEqual((index["a"]["related"], index["d"].get("related")), (["b"], None))
+
+
+class TestReview1110(PracticalProject):
+    """Рэгрэсіі па review_2026-10-14_v1.11.0.md."""
+
+    @staticmethod
+    def entry(slug, lines, lat0=42.0, lng0=41.0):
+        """Запіс паходу, як у індэксе сайта: лініі з пунктаў (усход, поўнач) у метрах ад [lng0, lat0], акругленыя
+        да 5 знакаў, як іх запісвае `hike build`."""
+        k = math.pi / 180 * practical.EARTH_R
+        made = [[[round(lng0 + e / (k * math.cos(math.radians(lat0))), 5), round(lat0 + n / k, 5)] for e, n in line] for line in lines]
+        pts = [p for line in made for p in line]
+        box = [min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)]
+        return {"slug": slug, "date": "2025-01-01", "title": {"be": slug, "en": ""}, "lines": made, "bbox": box}
+
+    def related(self, *hikes):
+        return {slug: bool(others) for slug, others in practical.related_hikes(list(hikes)).items()}
+
+    def test_short_tours_do_not_inflate_the_shared_way(self):  # №1
+        b = self.entry("b", [[(0, 0), (2000, 0)]])
+        # A: 60 м уздоўж B і 500 м убаку ад яго — агульная толькі дзясятая частка шляху
+        whole = self.entry("a", [[(0, 0), (60, 0)], [(0, 1000), (500, 1000)]])
+        split = self.entry("a", [[(10 * i, 0), (10 * i + 10, 0)] for i in range(6)] + [[(0, 1000), (500, 1000)]])
+        dense = self.entry("a", [[(10 * i, 0) for i in range(7)], [(0, 1000), (500, 1000)]])
+        for a in (whole, split, dense):
+            self.assertEqual(self.related(a, b), {"a": False, "b": False}, len(a["lines"]))
+        # тое ж з паўторамі пунктаў і турамі з аднаго пункта: вагі ў іх няма
+        points = self.entry("a", [[(0, 0), (0, 0), (60, 0)], [(30, 0)], [(30, 0)], [(0, 1000), (500, 1000)]])
+        self.assertEqual(self.related(points, b), {"a": False, "b": False})
+
+        # сапраўды больш за палову: 600 м з 1000 ідуць па B — і з адным турам, і кароткімі турамі
+        majority = self.entry("a", [[(0, 0), (600, 0)], [(0, 1000), (400, 1000)]])
+        pieces = self.entry("a", [[(37 * i, 0), (min(37 * i + 37, 600), 0)] for i in range(17)] + [[(0, 1000), (130, 1000)], [(130, 1000), (400, 1000)]])
+        for a in (majority, pieces):
+            self.assertEqual(self.related(a, b), {"a": True, "b": True}, len(a["lines"]))
+        # мяжа: 45 % і 55 % — апошнія няпоўныя кавалкі (130 м = 50 + 50 + 30) улічваюцца па іх даўжыні
+        self.assertEqual(self.related(self.entry("a", [[(0, 0), (450, 0)], [(0, 1000), (550, 1000)]]), b), {"a": False, "b": False})
+        self.assertEqual(self.related(self.entry("a", [[(0, 0), (550, 0)], [(0, 1000), (450, 1000)]]), b), {"a": True, "b": True})
+        self.assertEqual(self.related(self.entry("a", [[(0, 0), (130, 0)], [(0, 1000), (100, 1000)]]), b), {"a": True, "b": True})
+        self.assertEqual(self.related(self.entry("a", [[(0, 0), (130, 0)], [(0, 1000), (140, 1000)]]), b), {"a": False, "b": False})
+
+    def test_parallel_ways_far_north(self):  # №2
+        for lat in (42.0, 70.0, 80.0, -70.0):
+            for gap, together in ((130, True), (200, False)):
+                one = self.entry("a", [[(0, 0), (0, 1000)]], lat0=lat)
+                two = self.entry("b", [[(gap, 0), (gap, 1000)]], lat0=lat)
+                self.assertEqual(self.related(one, two), {"a": together, "b": together}, (lat, gap))
+                # трэк, які ідзе ўздоўж шыраты, — з тым жа вынікам
+                one = self.entry("a", [[(0, 0), (1000, 0)]], lat0=lat)
+                two = self.entry("b", [[(0, gap), (1000, gap)]], lat0=lat)
+                self.assertEqual(self.related(one, two), {"a": together, "b": together}, (lat, gap, "уздоўж шыраты"))
+
+        # поўная зборка на 70° — з лініямі, акругленымі ў індэксе
+        self.photos_root.mkdir()
+        k = math.pi / 180 * practical.EARTH_R
+        for tid, east in ((1, 0), (2, 130), (3, 400)):
+            pts = [(70.0 + n / k, 41.0 + east / (k * math.cos(math.radians(70.0)))) for n in range(0, 1001, 20)]
+            self.add_tour(tid, "2025-06-01T04:00:00Z", pts)
+            (self.content / f"t{tid}.yaml").write_text(f"date: 2025-06-01\ntitle: {{be: Шлях {tid}}}\nkomoot: [{tid}]\n", encoding="utf-8")
+        index = self.build()[0]
+        self.assertEqual({slug: h.get("related") for slug, h in index.items()}, {"t1": ["t2"], "t2": ["t1"], "t3": None})
+
+
+class TestReview1111(FetchProject):
+    """Рэгрэсіі па review_2026-10-14_v1.11.1.md."""
+
+    def test_osm_area_covers_the_hint_radius_at_any_latitude(self):  # №1
+        k = math.pi / 180 * practical.EARTH_R
+        nodes, wanted = [], {}
+        for tid, lat0 in ((1, 42.0), (2, 70.0), (3, -70.0)):
+            east = lambda metres: 41.0 + metres / (k * math.cos(math.radians(lat0)))  # noqa: E731
+            self.add_tour(tid, "2025-06-01T04:00:00Z", [(lat0 + n / k, 41.0) for n in range(0, 1001, 20)])
+            (self.content / f"m{tid}.yaml").write_text(f"date: 2025-06-01\ntitle: {{be: M{tid}}}\nkomoot: [{tid}]\n", encoding="utf-8")
+            # крыніцы ўздоўж мерыдыянальнага трэку: за 200 і 240 м на ўсход і захад — і за 300 м, далей за мяжу
+            # (у розных месцах трэку: аднолькавыя аб'екты бліжэй за 60 м адзін ад аднаго — адна падказка)
+            for i, (north, metres) in enumerate(((200, 200), (200, -200), (600, 240), (600, -240), (400, 300))):
+                node = osm_node(tid * 10 + i, 0, 0, natural="spring")
+                nodes.append({**node, "lat": lat0 + north / k, "lon": east(metres)})
+            wanted[f"m{tid}"] = [200, 200, 240, 240]
+        _, out = self.fetch(osm=nodes)
+        self.assertEqual(self.exit_code, 0, out)
+        index = self.build()[0]
+        found = {slug: sorted(h["pos"]["off"] for h in index[slug]["hints"]) for slug in wanted}
+        self.assertEqual(found, wanted, "усе крыніцы ў радыусе 250 м; за 300 м — адкінутая")
+        # для шырот Грузіі вобласць пошуку ранейшая: спампаваныя раней падказкі не састарэлі
+        day = practical.raw_days([1], 4)
+        self.assertEqual(practical.osm_bbox(day), [41.996, 40.996, 42.013, 41.004])
+        far = practical.osm_bbox(practical.raw_days([2], 4))
+        reach = 250 / (k * math.cos(math.radians(70.009)))  # 250 м па даўгаце на поўначы трэку
+        self.assertTrue(far[3] - 41.0 >= reach and 41.0 - far[1] >= reach, (far, reach))
+        # кэш з ранейшай вузкай вобласцю на поўначы — састарэлы: `hike fetch` пытае OSM нанова
+        cached = common.read_json(build.CACHE / "osm" / "m2.json")
+        common.write_json(build.CACHE / "osm" / "m2.json", {**cached, "key": practical.osm_key([69.996, 40.996, 70.013, 41.004])})
+        self.fetch(osm=nodes)
+        self.assertEqual([kind for kind, _ in self.calls].count("osm"), 1)
+        self.fetch(osm=nodes)
+        self.assertNotIn("osm", [kind for kind, _ in self.calls], "актуальны кэш — без запытаў")
+
+    def test_fetch_and_komoot_report_failures_with_exit_code(self):  # №2
+        import hike
+        self.hike("practical:\n  getting_there:\n    - {type: taxi, price: 80}\n")
+        offline = lambda *a, **k: (_ for _ in ()).throw(fetch.requests.ConnectionError("offline"))  # noqa: E731
+
+        # сэрвісы не адказваюць: надвор'е, OSM, дарога, назва месца, курс — пяць няўдач, код 1, нічога не запісана
+        _, out = self.fetch(weather=offline, rate=fetch_failure(), osm=fetch_failure(), route=offline, names=offline)
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertIn("Не атрымана: 5.", out)
+        self.assertFalse((build.CACHE / "weather" / "h.json").exists())
+
+        # усё атрымана: код 0; ужо актуальны кэш — без запытаў, таксама 0
+        _, out = self.fetch()
+        self.assertEqual(self.exit_code, 0, out)
+        _, out = self.fetch()
+        self.assertEqual((self.exit_code, self.calls), (0, []), out)
+
+        # сэрвіс надвор'я зноў не адказаў: астатняе спампаванае не кранаецца, код 1
+        files = lambda: {str(p.relative_to(build.CACHE)): p.read_bytes() for p in build.CACHE.rglob("*.json")  # noqa: E731
+                         if "komoot" not in p.parts and "weather" not in p.parts}
+        kept = files()
+        common.write_json(build.CACHE / "weather" / "h.json", {"days": {}})
+        _, out = self.fetch(weather=offline)
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertEqual(common.read_json(build.CACHE / "weather" / "h.json"), {"days": {}}, "няўдалы адказ нічога не перазапісвае")
+        self.assertEqual(files(), kept)
+        # няпоўнае надвор'е — таксама «не скончана»
+        _, out = self.fetch(weather=lambda params: hourly_answer(params, hole="precipitation"))
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertIn("Няпоўных адказаў: 1.", out)
+        _, out = self.fetch()
+        self.assertEqual(self.exit_code, 0, out)
+
+        # праз дыспетчар hike — тое ж: выключэнне SystemExit(1) становіцца кодам выхаду працэсу
+        with unittest.mock.patch.object(sys, "argv", ["hike", "fetch"]), unittest.mock.patch.object(fetch, "main", lambda argv: (_ for _ in ()).throw(SystemExit(1))):
+            with self.assertRaises(SystemExit) as stop:
+                hike.main()
+        self.assertEqual(stop.exception.code, 1)
+
+        # Komoot: тур без каардынат — код 1, добры трэк застаецца; поўны адказ — код 0
+        tour = {"id": 1, "name": "t1", "sport": "hike", "type": "tour_recorded", "status": "public", "date": "2025-06-01T04:00:00Z",
+                "changed_at": "new", "distance": 4000, "duration": 14400, "time_in_motion": 10800, "elevation_up": 400,
+                "elevation_down": 400, "start_point": None}
+        before = common.read_json(build.CACHE / "komoot" / "tours" / "1.json")["coords"]
+        out = TestReview1102.komoot(self, [tour], {1: []})
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertEqual(common.read_json(build.CACHE / "komoot" / "tours" / "1.json")["coords"], before)
+        out = TestReview1102.komoot(self, [tour], {1: coords(path(*SQUARE))})
+        self.assertEqual(self.exit_code, 0, out)
+        out = TestReview1102.komoot(self, [tour], {})
+        self.assertEqual((self.exit_code, "спампавана трэкаў: 0." in out), (0, True), "усё актуальна — код 0")
+
+
+class TestReview1112(StatusProject):
+    """Рэгрэсіі па review_2026-10-14_v1.11.2.md."""
+
+    def test_incomplete_weather_does_not_replace_complete_weather(self):  # №1
+        holey = lambda params: hourly_answer(params, hole="precipitation")  # noqa: E731
+        cache = lambda: common.read_json(build.CACHE / "weather" / "h.json")["days"]["2025-06-01"]  # noqa: E731
+        weather = lambda: self.build()[0]["h"]["days"][0]["weather"]  # noqa: E731
+        self.hike()
+        self.places('Keda: "Кеда"\n')
+        self.fetch(names=self.KEDA)
+        full = cache()
+        self.assertTrue(full["complete"])
+        published = weather()
+        self.assertEqual(published["span"]["precip"], 0.5)
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # --refresh: сэрвіс адказаў, але без ападкаў — поўныя звесткі для таго ж трэку застаюцца
+        _, out = self.fetch(["--refresh"], names=self.KEDA, weather=holey)
+        self.assertEqual(self.exit_code, 1, out)
+        self.assertEqual(cache(), {**full, "retry": True})
+        self.assertIn("надвор'е прыйшло няпоўным — застаюцца ранейшыя поўныя звесткі", out)
+        self.assertEqual(weather(), published, "на сайце — ранейшыя поўныя звесткі")
+        self.assertEqual(self.todo(), [".\\hike fetch  — няма надвор'я або яно няпоўнае: h"], "абнаўленне не скончана")
+        # наступны звычайны `hike fetch` спрабуе зноў: зноў няпоўны — усё як было; поўны — метка знікае
+        _, out = self.fetch(names=self.KEDA, weather=holey)
+        self.assertEqual(([kind for kind, _ in self.calls], self.exit_code, cache()), (["weather"], 1, {**full, "retry": True}), out)
+        _, out = self.fetch(names=self.KEDA)
+        self.assertEqual(([kind for kind, _ in self.calls], self.exit_code, cache()["complete"], "retry" in cache()), (["weather"], 0, True, False), out)
+        self.build()
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # пусты кэш: няпоўныя звесткі лепш, чым ніякіх — захоўваюцца, як і раней
+        (build.CACHE / "weather" / "h.json").unlink()
+        _, out = self.fetch(names=self.KEDA, weather=holey)
+        self.assertEqual((self.exit_code, cache()["complete"]), (1, False), out)
+        self.assertNotIn("precip", weather()["span"])
+        _, out = self.fetch(names=self.KEDA)
+        self.assertEqual((self.exit_code, cache()["complete"]), (0, True), out)
+
+        # трэк змяніўся: поўныя звесткі старога трэку не падыходзяць — захоўваецца няпоўны адказ для новага
+        old_key = cache()["key"]
+        self.add_tour(1, "2025-06-01T05:00:00Z", path(*SQUARE))
+        _, out = self.fetch(names=self.KEDA, weather=holey)
+        self.assertEqual((self.exit_code, cache()["complete"], "retry" in cache()), (1, False, False), out)
+        self.assertNotEqual(cache()["key"], old_key)
+        _, out = self.fetch(names=self.KEDA)
+        self.assertEqual((self.exit_code, cache()["complete"]), (0, True), out)
+
+
+def fetch_failure():
+    """Адказ сэрвісу з памылкай HTTP 503."""
+    return FakeResponse({}, status=503)
 
 
 if __name__ == "__main__":

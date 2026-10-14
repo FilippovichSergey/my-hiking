@@ -742,7 +742,11 @@ class TestReviewFixes(TempProject):
                 unittest.mock.patch("getpass.getpass", lambda *a: "p"), \
                 unittest.mock.patch("time.sleep", lambda *a: None), \
                 unittest.mock.patch("sys.stdout", out):
-            komoot.main(list(argv))
+            try:
+                komoot.main(list(argv))
+                self.exit_code = 0
+            except SystemExit as stop:  # Komoot аддаў не ўсё: каманда завяршаецца з кодам 1
+                self.exit_code = stop.code
         return out.getvalue()
 
     def test_r8_1_komoot_answer_without_coordinates_keeps_cache_and_track(self):

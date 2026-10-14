@@ -173,6 +173,7 @@ export function createMap(el, { onSelect, popupExtra }) {
     }
     btn3d.textContent = t("terrain3d");
     btn3d.setAttribute("aria-pressed", String(terrainOn));
+    updateMarks();
   }
 
   function setBase(key) {
@@ -247,10 +248,11 @@ export function createMap(el, { onSelect, popupExtra }) {
   const farHints = () => el.classList.toggle("hints-far", map.getZoom() < HINTS_MIN_ZOOM);
   map.on("zoom", farHints);
 
-  function setPois(items) {
+  let poiItems = [];
+  function drawPois() {
     poiPopup.remove();
     poiMarkers.forEach((m) => m.remove());
-    poiMarkers = items.map((it) => {
+    poiMarkers = poiItems.filter((it) => marksOn.hints || !it.hint).map((it) => {
       const show = () => poiPopup.setLngLat(it.at).setDOMContent(h("div", null,
         h("div", { class: "popup-title" }, it.title),
         h("div", { class: "popup-meta" }, it.where),
@@ -264,6 +266,12 @@ export function createMap(el, { onSelect, popupExtra }) {
       return new maplibregl.Marker({ element: badge }).setLngLat(it.at).addTo(map);
     });
     farHints();
+  }
+
+  function setPois(items) {
+    poiItems = items;
+    drawPois();
+    updateMarks();
   }
 
   // --- Фота выбранага паходу: значкі там, дзе зроблены здымкі ---
@@ -299,7 +307,7 @@ export function createMap(el, { onSelect, popupExtra }) {
   }
 
   function drawPhotos() {
-    const groups = photoGroups();
+    const groups = marksOn.photos ? photoGroups() : [];
     const layout = groups.map((g) => g.items.map((item) => item.index).join(",")).join("|");
     if (layout === photoLayout) return; // склад значкоў не змяніўся — адкрытае акенца застаецца
     photoLayout = layout;
@@ -323,9 +331,41 @@ export function createMap(el, { onSelect, popupExtra }) {
     openPhoto = onOpen;
     photoLayout = null;
     drawPhotos();
+    updateMarks();
   }
   map.on("zoomend", drawPhotos);
   map.on("pitchend", drawPhotos);
+
+  // --- Што паказваць на карце выбранага паходу: значкі фота і падказкі OpenStreetMap ---
+  // Значкоў бывае шмат; кожны від можна схаваць і пакінуць трэк са сваімі запісамі. Выбар запамінаецца.
+  // Кнопка ёсць толькі тады, калі ў паходу ёсць што хаваць.
+  const marksOn = { photos: store("map-photos") !== "0", hints: store("map-hints") !== "0" };
+  const markBtns = Object.fromEntries(Object.keys(marksOn).map((key) =>
+    [key, h("button", { type: "button", onclick: () => toggleMarks(key) })]));
+  const marksCtl = h("div", { class: "maplibregl-ctrl map-ctl map-marks", hidden: true }, Object.values(markBtns));
+  map.addControl({ onAdd: () => marksCtl, onRemove: () => marksCtl.remove() }, "top-right");
+
+  function updateMarks() {
+    const have = { photos: photoItems.length > 0, hints: poiItems.some((it) => it.hint) };
+    for (const [key, b] of Object.entries(markBtns)) {
+      b.hidden = !have[key];
+      b.textContent = t("mapMarks")[key];
+      b.setAttribute("aria-pressed", String(marksOn[key]));
+    }
+    marksCtl.hidden = !have.photos && !have.hints;
+  }
+
+  function toggleMarks(key) {
+    marksOn[key] = !marksOn[key];
+    store(`map-${key}`, marksOn[key] ? "1" : "0");
+    if (key === "photos") {
+      photoLayout = null;
+      drawPhotos();
+    } else {
+      drawPois();
+    }
+    updateMarks();
+  }
 
   function highlight(slug) {
     if (hoveredSlug) map.setFeatureState({ source: "lines", id: hoveredSlug }, { hover: false });

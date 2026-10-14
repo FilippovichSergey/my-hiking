@@ -774,6 +774,45 @@ test("значкі фота на карце адкрытага паходу", as
   }
 });
 
+test("старонка паходу: «Я хадзіў сюды яшчэ» са спасылкамі на іншыя паходы ў тое самае месца", async () => {
+  const find = (slug) => DATA.hikes.find((hk) => hk.slug === slug);
+  // спіс `related` лічыць зборка: найноўшыя першымі; «gone» — паход, якога ў індэксе ўжо няма
+  find("guria").related = ["late", "gone", "notrack"];
+  find("late").date = find("late").end = "2025-03-05";
+  find("notrack").related = ["guria"];
+  const again = () => [...panel().querySelectorAll("h2")].find((el) => el.textContent === "Я хадзіў сюды яшчэ");
+  const cards = () => [...(again()?.nextElementSibling.querySelectorAll(".card") || [])];
+  try {
+    await go("#/be/guria");
+    await waitFor(() => again(), "блок з іншымі паходамі");
+    assert.equal(again().nextElementSibling.className, "hike-list");
+    assert.deepEqual(cards().map((c) => c.querySelector(".card-title").textContent), ["late", "notrack"]);
+    assert.equal(cards()[0].querySelector(".card-meta").textContent, "5 сакавіка 2025 · Гурыя");
+    assert.equal(cards()[0].querySelector(".card-nums").textContent.includes("25"), true, "картка тая ж, што ў спісе: з лічбамі паходу");
+    const headings = [...panel().querySelectorAll("h2")].map((el) => el.textContent);
+    assert.ok(headings.indexOf("Уражанні") < headings.indexOf("Я хадзіў сюды яшчэ"), "блок стаіць пасля ўражанняў");
+
+    // спасылка вядзе на паход, а там — зваротная спасылка
+    cards()[1].click();
+    await waitFor(() => window.location.hash === "#/be/notrack" && cards().length === 1, "пераход да іншага паходу");
+    assert.deepEqual(cards().map((c) => c.querySelector(".card-title").textContent), ["guria"]);
+    // іншая мова — іншы загаловак; паход без такіх паходаў — без блока
+    await go("#/ru/notrack");
+    await waitFor(() => [...panel().querySelectorAll("h2")].some((el) => el.textContent === "Я ходил сюда ещё"), "блок па-руску");
+    await go("#/en/notrack");
+    await waitFor(() => [...panel().querySelectorAll("h2")].some((el) => el.textContent === "More hikes here"), "блок па-англійску");
+    await go("#/be/trek3");
+    await waitFor(() => panel().querySelector("h1")?.textContent === "trek3", "паход без паўтораў");
+    assert.equal(again(), undefined);
+    assert.equal(panel().querySelector(".hike-list"), null);
+  } finally {
+    delete find("guria").related;
+    delete find("notrack").related;
+    find("late").date = find("late").end = "2025-01-01";
+    await go("#/be");
+  }
+});
+
 test("даныя паходаў бяруцца па адрасе з версіяй з index.html", () => {
   const meta = document.querySelector('meta[name="hikes-data"]');
   assert.match(meta.content, /^data\/hikes\.json\?v=[0-9a-f]{10}$/, "версію даных запісвае `hike build`");

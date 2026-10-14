@@ -488,6 +488,9 @@ button.poi:hover, button.poi:focus-visible { z-index: 2; background: var(--surfa
   color: var(--text-2) !important;
 }
 .map-ctl button + button { border-top: 1px solid var(--border) !important; }
+/* «Фота» і «Падказкі»: кнопка ёсць, толькі калі ў адкрытага паходу ёсць такія значкі */
+.map-ctl[hidden], .map-ctl button[hidden] { display: none !important; }
+.map-ctl button[hidden] + button { border-top: 0 !important; }
 .map-ctl button[aria-pressed="true"] { color: var(--text) !important; font-weight: 650; background: var(--accent-soft); }
 .map-ctl button:hover { background: var(--surface-2); }
 .maplibregl-ctrl-group { background: var(--surface); }

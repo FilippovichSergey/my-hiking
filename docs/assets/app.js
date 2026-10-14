@@ -473,6 +473,8 @@ async function renderDetail(hike, fit = true) {
     h("h2", null, t("impressions")),
     impressions(hike),
 
+    relatedHikes(hike).length ? [h("h2", null, t("again")), h("ul", { class: "hike-list" }, relatedHikes(hike).map(card))] : null,
+
     hike.days.some((d) => d.komoot.length) ? [
       h("h2", null, t("links")),
       h("div", { class: "links" }, hike.days.flatMap((d) => d.komoot.map((url) =>
@@ -512,6 +514,14 @@ function setDay(hike, day) {
   if (state.selected !== hike) return;
   state.day = day;
   renderDetail(hike, true);
+}
+
+/**
+ * Іншыя паходы ў тое самае месца, найноўшыя першымі: з той жа назвай або па тым жа шляху.
+ * Спіс `related` лічыць `hike build`; у кэшы браўзера яшчэ можа быць ранейшы індэкс без яго.
+ */
+function relatedHikes(hike) {
+  return (hike.related || []).map((slug) => state.hikes.find((hk) => hk.slug === slug)).filter(Boolean);
 }
 
 function impressions(hike) {

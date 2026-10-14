@@ -897,6 +897,10 @@ def main(argv=None) -> None:
     pending += [f for f in (DOCS / "data" / "tracks").glob("*.json") if f.name not in referenced]
 
     hikes.sort(key=lambda h: h["date"], reverse=True)
+    # Іншыя паходы ў тое самае месца: з той жа назвай або па тым жа шляху — для спасылак на старонцы паходу.
+    for hike, again in zip(hikes, map(practical.related_hikes(hikes).get, (h["slug"] for h in hikes))):
+        if again:
+            hike["related"] = again
     # Старонкі <мова>/<паход>/ з прэв'ю для спасылак: патрэбны адрас сайта (site_url у config.yaml).
     site, stale = pages.share_pages(DOCS, hikes, cfg.get("site_url"))
     pending += stale
