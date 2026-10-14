@@ -3655,12 +3655,118 @@ class TestReview1121(PracticalProject):
         code, out, err, cache = self.youtube(["a", "b", "old"], {})
         self.assertEqual((code, len(cache)), (0, 3), out)
 
+    def test_youtube_answer_without_date_is_not_a_success(self):  # працяг №1 па review_2026-10-14_v1.13.0.md
+        old = {"id": "old", "title": "Стары", "upload_date": "20250101", "duration": 60}
+        common.write_json(build.CACHE / "youtube.json", [old])
+        for answer in ({"title": "Mtirala", "upload_date": None, "duration": 120}, {"title": "Mtirala"}, None,
+                       {"title": "Mtirala", "upload_date": "2025-03-01"}):
+            code, out, err, cache = self.youtube(["new", "old"], {"new": answer})
+            self.assertEqual(code, 1, (answer, out))
+            self.assertIn("! new: YouTube не аддаў дату публікацыі", err)
+            self.assertIn("Не атрымана: 1", out)
+            self.assertNotIn("None", out)
+            self.assertEqual(cache, [{**old, "title": "t-old"}], "няпоўны адказ не запісваецца")
+        # паўтор з поўным адказам: відэа запісана, код 0
+        code, out, err, cache = self.youtube(["new", "old"], {"new": {"title": "Mtirala", "upload_date": "20250301", "duration": 120}})
+        self.assertEqual((code, err, [v["id"] for v in cache]), (0, "", ["new", "old"]), out)
+        self.assertIn("+ 20250301  Mtirala", out)
+
         # спіс канала не атрыманы: паведамленне, код 1, кэш не мяняецца
         before = (build.CACHE / "youtube.json").read_bytes()
         code, out, err, cache = self.youtube(RuntimeError("HTTP 500"), {})
         self.assertEqual(code, 1)
         self.assertIn("Спіс відэа канала не атрыманы — HTTP 500", err)
         self.assertEqual((build.CACHE / "youtube.json").read_bytes(), before)
+
+
+class TestSmallCovers(PracticalProject):
+    """Маленькая квадратная вокладка для спіса паходаў (замест мініяцюры 640 px)."""
+
+    FOLDER = "20250601_Паход"
+
+    def shot(self, name, color, taken):
+        exif = Image.Exif()
+        exif.get_ifd(0x8769)[36867] = taken
+        target = self.photos_root / self.FOLDER / "Сайт" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (80, 60), color).save(target, "JPEG", exif=exif)
+
+    def covers(self):
+        folder = build.DOCS / "covers"
+        return sorted(f.name for f in folder.iterdir()) if folder.is_dir() else []
+
+    def test_small_square_cover_for_the_list(self):
+        (self.content / "h.yaml").write_text(f"date: 2025-06-01\ntitle: {{be: H}}\nphotos_folder: {self.FOLDER}\n", encoding="utf-8")
+        (self.content / "e.yaml").write_text("date: 2025-06-02\ntitle: {be: E}\nlocation: [41, 42]\n", encoding="utf-8")
+        self.shot("A.jpg", (200, 30, 30), "2025:06:01 09:00:00")
+        self.shot("B.jpg", (30, 30, 200), "2025:06:01 10:00:00")
+        index = self.build()[0]
+        small = index["h"]["coverSmall"]
+        self.assertRegex(small, r"^covers/h-[0-9a-f]{8}\.webp$")
+        with Image.open(build.DOCS / small) as im:
+            self.assertEqual((im.format, im.size), ("WEBP", (build.COVER_PX, build.COVER_PX)))
+            self.assertGreater(im.convert("RGB").getpixel((70, 70))[0], 150, "першае фота па часе — чырвонае")
+        self.assertNotIn("coverSmall", index["e"], "паход без фота — без вокладкі")
+        # паўторная зборка: той жа файл, лішніх няма
+        self.assertEqual(self.build()[0]["h"]["coverSmall"], small)
+        self.assertEqual(self.covers(), [small.split("/")[1]])
+
+        # зададзеная іншая вокладка — новы файл, ранейшы прыбіраецца пасля запісу індэкса
+        text = (self.content / "h.yaml").read_text(encoding="utf-8")
+        (self.content / "h.yaml").write_text(text + "cover: B\n", encoding="utf-8")
+        other = self.build()[0]["h"]["coverSmall"]
+        self.assertNotEqual(other, small)
+        self.assertEqual(self.covers(), [other.split("/")[1]])
+        with Image.open(build.DOCS / other) as im:
+            self.assertGreater(im.convert("RGB").getpixel((70, 70))[2], 150, "сіняе фота B")
+
+        # дыск з фота адключаны: вокладка робіцца з апублікаванай мініяцюры і застаецца той жа
+        (build.DOCS / other).unlink()
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.assertEqual(self.build()[0]["h"]["coverSmall"], other)
+        self.assertTrue((build.DOCS / other).is_file())
+
+        # фота прыбралі з паходу — няма і вокладкі
+        (self.content / "h.yaml").write_text("date: 2025-06-01\ntitle: {be: H}\nlocation: [41, 42]\n", encoding="utf-8")
+        self.assertNotIn("coverSmall", self.build()[0]["h"])
+        self.assertEqual(self.covers(), [])
+
+
+class TestReview1130(StatusProject):
+    """Рэгрэсіі па review_2026-10-14_v1.13.0.md."""
+
+    def test_status_notices_lost_track_and_small_cover(self):  # №1
+        self.hike(f"photos_folder: {self.FOLDER}\n")
+        self.photo(self.FOLDER, "A.jpg", "2025:06:01 09:00:00")
+        self.places('Keda: "Кеда"\n')
+        self.fetch(names=self.KEDA)
+        site = self.build()[0]["h"]
+        track, cover = build.DOCS / site["track"], build.DOCS / site["coverSmall"]
+        lost_track = ".\\hike build  — няма апублікаванага файла трэку: h"
+        lost_cover = ".\\hike build  — няма маленькай вокладкі для спіса: h"
+        self.assertEqual(self.todo(), ALL_DONE)
+        for lost, need in ((track, lost_track), (cover, lost_cover)):
+            lost.unlink()
+            self.assertEqual(self.todo(), [need])
+            self.build()
+            self.assertTrue(lost.is_file(), lost)
+            self.assertEqual(self.todo(), ALL_DONE)
+
+        # дыск з фота адключаны: вокладка аднаўляецца з мініяцюры, таму status раіць зборку і тады
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.build()  # змяніліся налады — гэта асобная прычына для зборкі
+        self.assertEqual(self.todo(), ALL_DONE)
+        cover.unlink()
+        self.assertEqual(self.todo(), [lost_cover])
+        self.build()
+        self.assertTrue(cover.is_file())
+        self.assertEqual(self.todo(), ALL_DONE)
+
+        # індэкс ранейшай версіі без маленькай вокладкі — не прычына для зборкі: поле неабавязковае
+        index = common.read_json(build.DOCS / "data" / "hikes.json")
+        del index["hikes"][0]["coverSmall"]
+        common.write_json(build.DOCS / "data" / "hikes.json", index)
+        self.assertEqual(self.todo(), ALL_DONE)
 
 
 def fetch_failure():

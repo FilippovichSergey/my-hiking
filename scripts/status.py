@@ -39,6 +39,8 @@ PRACTICAL = (
 
 
 PHOTOS_CHANGED = "фота на сайце не тыя, што ў тэчцы: ёсць новыя, змененыя, выдаленыя або зборка не скончылася"
+LOST_TRACK = "няма апублікаванага файла трэку"
+LOST_COVER = "няма маленькай вокладкі для спіса"
 
 
 def filled(value) -> bool:
@@ -132,6 +134,11 @@ def hike_status(slug: str, h: dict, site: dict | None, shared: dict) -> dict:
         status["todo"].append(("build", "пасля зборкі змяніліся файл паходу, слоўнік назваў або спампаваныя звесткі", slug))
     if build.photos_changed(slug, h, cfg, site):
         status["todo"].append(("build", PHOTOS_CHANGED, slug))
+    # Апублікаваныя файлы трэку і маленькай вокладкі маглі згубіцца (капіяванне, выдаленне ўручную): подпіс уваходных
+    # даных і фота ад гэтага не мяняецца, а зборка іх аднаўляе — трэк з кэша тураў, вокладку з мініяцюры фота.
+    for field, what in (("track", LOST_TRACK), ("coverSmall", LOST_COVER)):
+        if isinstance(site.get(field), str) and not (DOCS / site[field]).is_file():
+            status["todo"].append(("build", what, slug))
     for item in [site.get("facts") or {}] + [day.get("facts") or {} for day in site.get("days") or []]:
         for edge in ("start", "finish"):
             was = item.get(edge) or {}

@@ -30,6 +30,8 @@ PILLOW_EXT = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
 MAGICK_EXT = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".heic", ".heif"}
 DIFFICULTIES = {"easy", "medium", "hard", "expert"}
 DETAIL_TOLERANCE_M = 3     # трэк для профілю і карты пры выбары паходу
+COVER_PX = 144             # маленькая вокладка для спіса: квадрацік 72 px на экранах з падвойнай шчыльнасцю
+COVER_QUALITY = 70
 OVERVIEW_TOLERANCE_M = 30  # лініі ўсіх паходаў на агульнай карце
 
 
@@ -181,6 +183,36 @@ def _webp_bytes(img: Image.Image, quality: int) -> bytes:
     buf = io.BytesIO()
     img.save(buf, "WEBP", quality=quality, method=5)
     return buf.getvalue()
+
+
+def small_cover(slug: str, photo: dict | None, used: set) -> str | None:
+    """Маленькая квадратная вокладка для спіса паходаў (COVER_PX), абрэзаная па цэнтры, — замест мініяцюры 640 px.
+
+    Робіцца з апублікаванай мініяцюры вокладкі (без яе — з поўнай копіі), таму працуе і без дыска з арыгіналамі.
+    У імені — подпіс зыходнага файла: новая вокладка атрымлівае новы файл, і браўзер не пакажа старую з кэша;
+    гатовы файл не пераціскаецца. used — імёны патрэбных файлаў (астатнія ў docs/covers зборка прыбірае).
+    None — вокладкі няма: сайт пакажа мініяцюру.
+    """
+    if not photo:
+        return None
+    source = next((DOCS / p for p in (photo.get("thumb"), photo.get("src")) if p and (DOCS / p).is_file()), None)
+    if source is None:
+        return None
+    data = source.read_bytes()
+    name = f"{slug}-{hashlib.sha1(data + f'{COVER_PX}/{COVER_QUALITY}'.encode()).hexdigest()[:8]}.webp"
+    target = DOCS / "covers" / name
+    used.add(name)
+    if not target.is_file():
+        try:
+            with Image.open(io.BytesIO(data)) as im:
+                small = ImageOps.fit(im.convert("RGB"), (COVER_PX, COVER_PX), Image.LANCZOS)
+        except (OSError, ValueError) as exc:
+            print(f"  ! {slug}: маленькая вокладка не зроблена ({exc}) — у спісе застаецца мініяцюра")
+            used.discard(name)
+            return None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_bytes(target, _webp_bytes(small, COVER_QUALITY))
+    return f"covers/{name}"
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
@@ -724,6 +756,7 @@ def main(argv=None) -> None:
     no_weather: set[str] = set()
     no_services: set[str] = set()
     no_climate: set[str] = set()
+    covers_used: set[str] = set()
     hikes = []
     for slug, h in sources:
         if h.get("hidden"):
@@ -897,6 +930,7 @@ def main(argv=None) -> None:
             "lines": lines,
             "track": track,
             "cover": cover_idx if photos else None,
+            **({"coverSmall": small} if (small := small_cover(slug, photos[cover_idx] if photos else None, covers_used)) else {}),
             "photos": photos,
             **({"photoKey": places_key} if photos and places_key else {}),  # подпіс трэку і photo_clock для месцаў фота
             "videos": videos,
@@ -908,6 +942,7 @@ def main(argv=None) -> None:
     pending += [d for d in (DOCS / "photos").glob("*") if d.is_dir() and d.name not in slugs]
     referenced = {Path(h["track"]).name for h in hikes if h["track"]}
     pending += [f for f in (DOCS / "data" / "tracks").glob("*.json") if f.name not in referenced]
+    pending += [f for f in (DOCS / "covers").glob("*.webp") if f.name not in covers_used]
 
     hikes.sort(key=lambda h: h["date"], reverse=True)
     # Іншыя паходы ў тое самае месца: з той жа назвай або па тым жа шляху — для спасылак на старонцы паходу.

@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 
 from yt_dlp import YoutubeDL
@@ -37,13 +38,20 @@ def main(argv=None) -> None:
                     failed += 1
                     print(f"  ! {vid}: {exc}", file=sys.stderr)
                     continue
+                day = (info or {}).get("upload_date")
+                if not (isinstance(day, str) and re.fullmatch(r"[0-9]{8}", day)):
+                    # Няпоўны адказ: без даты відэа не трапіць у чарнавік паходу. Як і памылка, ён не запісваецца,
+                    # а відэа лічыцца неатрыманым — наступны запуск спытае яго зноў.
+                    failed += 1
+                    print(f"  ! {vid}: YouTube не аддаў дату публікацыі", file=sys.stderr)
+                    continue
                 known[vid] = {
                     "id": vid,
                     "title": info.get("title"),
-                    "upload_date": info.get("upload_date"),
+                    "upload_date": day,
                     "duration": info.get("duration"),
                 }
-                print(f"  + {info.get('upload_date')}  {info.get('title')}")
+                print(f"  + {day}  {info.get('title')}")
 
     for e in entries:  # назвы маглі змяніцца
         if e["id"] in known:

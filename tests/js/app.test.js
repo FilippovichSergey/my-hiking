@@ -912,6 +912,36 @@ test("звычайнае надвор'е па месяцах: табліца, в
   }
 });
 
+test("спіс паходаў: маленькая вокладка замест мініяцюры", async () => {
+  const guria = DATA.hikes.find((hk) => hk.slug === "guria");
+  const img = () => [...panel().querySelectorAll(".card")].find((c) => c.querySelector(".card-title").textContent === "guria")
+    .querySelector("img.thumb");
+  guria.photos = [{ src: "photos/guria/a.webp", thumb: "photos/guria/a-t.webp", w: 2000, h: 1500 }];
+  guria.cover = 0;
+  try {
+    guria.coverSmall = "covers/guria-0123abcd.webp";
+    await go("#/be/slow");
+    await go("#/be");
+    assert.equal(img().getAttribute("src"), "covers/guria-0123abcd.webp");
+    assert.deepEqual([img().getAttribute("width"), img().getAttribute("height"), img().getAttribute("loading")], ["72", "72", "lazy"]);
+    // файл вокладкі не загрузіўся — мініяцюра; калі не загрузілася і яна, далей нічога не пытаецца
+    img().dispatchEvent(new window.Event("error"));
+    assert.equal(img().getAttribute("src"), "photos/guria/a-t.webp");
+    img().dispatchEvent(new window.Event("error"));
+    assert.equal(img().getAttribute("src"), "photos/guria/a-t.webp");
+    // індэкс ранейшай версіі (без маленькай вокладкі) — мініяцюра
+    delete guria.coverSmall;
+    await go("#/be/slow");
+    await go("#/be");
+    assert.equal(img().getAttribute("src"), "photos/guria/a-t.webp");
+  } finally {
+    guria.photos = [];
+    guria.cover = null;
+    delete guria.coverSmall;
+    await go("#/be");
+  }
+});
+
 test("даныя паходаў бяруцца па адрасе з версіяй з index.html", () => {
   const meta = document.querySelector('meta[name="hikes-data"]');
   assert.match(meta.content, /^data\/hikes\.json\?v=[0-9a-f]{10}$/, "версію даных запісвае `hike build`");

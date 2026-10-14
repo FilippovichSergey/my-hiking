@@ -302,6 +302,8 @@ class TestReviewFixes(TempProject):
                     self.assertTrue((build.DOCS / p[k]).exists(), p[k])
             if h["track"]:
                 self.assertTrue((build.DOCS / h["track"]).exists(), h["track"])
+            if h.get("coverSmall"):
+                self.assertTrue((build.DOCS / h["coverSmall"]).exists(), h["coverSmall"])
 
     def test_r2_1_missing_tour_cache_keeps_published_track(self):
         self.photos_root.mkdir()

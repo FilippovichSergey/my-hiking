@@ -336,8 +336,11 @@ function renderList() {
 
 function card(hk) {
   const cover = hk.photos[hk.cover ?? 0];
+  // маленькая квадратная вокладка (робіць `hike build`); у ранейшым індэксе яе няма або файл не загрузіўся — мініяцюра
+  const fallback = (e) => { if (e.target.getAttribute("src") !== cover.thumb) e.target.src = cover.thumb; };
   const thumb = cover
-    ? h("img", { class: "thumb", src: cover.thumb, alt: "", loading: "lazy", width: 72, height: 72 })
+    ? h("img", { class: "thumb", src: hk.coverSmall || cover.thumb, alt: "", loading: "lazy", width: 72, height: 72,
+      onerror: hk.coverSmall ? fallback : null })
     : h("div", { class: "thumb placeholder" });
   if (!cover) thumb.innerHTML = MOUNTAIN_ICON;
   const nums = hikeNums(hk);
