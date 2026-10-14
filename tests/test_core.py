@@ -1141,6 +1141,24 @@ class TestReviewFixes(TempProject):
         published = common.read_json(common.ROOT / "docs" / "data" / "hikes.json")
         self.assertEqual(published.get("version"), version, "запусціце `hike build`: у docs/data/hikes.json старая версія")
 
+    def test_file_signatures_do_not_depend_on_line_endings(self):
+        """Файл з CRLF у рабочай тэчцы на Windows і ён жа з LF у свежай копіі рэпазітара — адзін подпіс."""
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp)
+            (docs / "assets").mkdir()
+            sprite, data = docs / "assets" / "sprite.svg", docs / "hikes.json"
+            sprite.write_bytes(b"<svg>\n  <path/>\n</svg>\n")
+            data.write_bytes(b'{"a": 1}\n')
+            lf = pages.assets_version(docs), pages.file_version(data)
+            sprite.write_bytes(b"<svg>\r\n  <path/>\r\n</svg>\r\n")
+            data.write_bytes(b'{"a": 1}\r\n')
+            self.assertEqual((pages.assets_version(docs), pages.file_version(data)), lf)
+            # змесціва змянілася — подпіс новы
+            sprite.write_bytes(b"<svg>\n  <path d=''/>\n</svg>\n")
+            data.write_bytes(b'{"a": 2}\n')
+            self.assertNotEqual(pages.assets_version(docs), lf[0])
+            self.assertNotEqual(pages.file_version(data), lf[1])
+
     def test_published_index_html_names_current_file_versions(self):
         """Пасля змены файлаў сайта патрэбны `hike build`: інакш браўзер возьме іх са старога кэша."""
         docs = common.ROOT / "docs"

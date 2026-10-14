@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.13.2 — 2026-10-14
+
+### Fixed
+- Першы запуск тэстаў на GitHub упаў на `test_published_index_html_names_current_file_versions`: подпіс файлаў
+  `docs/assets` лічыўся па байтах, а `difficulty-sprite.svg` у рабочай тэчцы на Windows захаваны з канцамі радкоў
+  CRLF, у рэпазітары ж — з LF. Таму `index.html`, сабраны дома, не супадаў са свежай копіяй. Цяпер подпісы файлаў
+  сайта (і `hikes.json`) лічаць CRLF як LF; подпіс assets адзін раз змяніўся.
+
+### Changed
+- Workflow тэстаў карыстаецца `actions/checkout`, `setup-python` і `setup-node` версіі 7 (Node.js 24): GitHub
+  папярэджваў, што версіі на Node.js 20 састарэлі.
+
+### Added
+- Тэст `test_file_signatures_do_not_depend_on_line_endings`; усяго 171 Python-тэст (уключна з запускам 39 JS-тэстаў).
+
 ## 1.13.1 — 2026-10-14
 
 Addresses `review/review_2026-10-14_v1.13.0.md`.

@@ -96,18 +96,28 @@ def summary(hike: dict, lang: str) -> str:
 
 # --- Версіі файлаў у index.html -------------------------------------------------------
 
+def _signed_bytes(path: Path) -> bytes:
+    """Змесціва файла для подпісу; канцы радкоў CRLF лічацца як LF.
+
+    Git захоўвае тэкставыя файлы з LF (.gitattributes), а ў рабочай тэчцы на Windows файл можа застацца з CRLF.
+    Подпіс ад гэтага не залежыць: інакш index.html, сабраны дома, не супаў бы са свежай копіяй рэпазітара
+    (тэсты на GitHub), хоць змесціва тое ж.
+    """
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def assets_version(docs: Path) -> str:
     """Подпіс усіх файлаў docs/assets: мяняецца, калі змяніўся хоць адзін з іх."""
     digest = hashlib.sha1()
     for path in sorted((docs / "assets").iterdir()):
         if path.is_file():
             digest.update(path.name.encode())
-            digest.update(path.read_bytes())
+            digest.update(_signed_bytes(path))
     return digest.hexdigest()[:10]
 
 
 def file_version(path: Path) -> str:
-    return hashlib.sha1(path.read_bytes()).hexdigest()[:10]
+    return hashlib.sha1(_signed_bytes(path)).hexdigest()[:10]
 
 
 def _meta(key: str, value: str, prop: bool = True) -> str:
