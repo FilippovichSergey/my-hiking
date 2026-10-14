@@ -19,6 +19,7 @@ from PIL import Image  # noqa: E402
 
 import build  # noqa: E402
 import common  # noqa: E402
+import pages  # noqa: E402
 import geo  # noqa: E402
 import komoot  # noqa: E402
 import scaffold  # noqa: E402
@@ -364,7 +365,7 @@ class TestReviewFixes(TempProject):
         self.referenced_files_exist()
 
     def test_r2_3_restore_without_cache_uses_previous_index(self):
-        self.write_hike()  # photos_root недаступны, трэку і location няма
+        self.write_hike(cover="A")  # photos_root недаступны, трэку і location няма; без поля cover вокладка — першае фота
         out = self.publish_photos(["a", "b"], with_manifest=False)
         photos = [{"src": f"photos/h/{n}.webp", "thumb": f"photos/h/{n}-t.webp", "w": 40, "h": 30} for n in ("b", "a")]
         common.write_json(build.DOCS / "data" / "hikes.json", {"hikes": [
@@ -1133,6 +1134,24 @@ class TestReviewFixes(TempProject):
         # падвал апублікаванага сайта паказвае версію з індэкса: пасля змены VERSION патрэбны `hike build`
         published = common.read_json(common.ROOT / "docs" / "data" / "hikes.json")
         self.assertEqual(published.get("version"), version, "запусціце `hike build`: у docs/data/hikes.json старая версія")
+
+    def test_published_index_html_names_current_file_versions(self):
+        """Пасля змены файлаў сайта патрэбны `hike build`: інакш браўзер возьме іх са старога кэша."""
+        docs = common.ROOT / "docs"
+        text = (docs / "index.html").read_text(encoding="utf-8")
+        version = pages.assets_version(docs)
+        hint = "запусціце `hike build`: у docs/index.html версіі ранейшых файлаў"
+        self.assertIn(f'href="assets/style.css?v={version}"', text, hint)
+        self.assertIn(f'src="assets/app.js?v={version}"', text, hint)
+        imports = json.loads(re.search(r'<script type="importmap">(.*?)</script>', text)[1])["imports"]
+        modules = sorted(p.name for p in (docs / "assets").glob("*.js"))
+        self.assertEqual(imports, {f"./assets/{name}": f"./assets/{name}?v={version}" for name in modules}, hint)
+        self.assertLess(text.index('type="importmap"'), text.index('type="module"'), "карта імпартаў — перад модулем")
+        self.assertIn(f'content="data/hikes.json?v={pages.file_version(docs / "data" / "hikes.json")}"', text, hint)
+        # кожны модуль імпартуе суседзяў па адносным адрасе: толькі такія імпарты карта пераводзіць на новую версію
+        for name in modules:
+            for spec in re.findall(r'^import .*? from "([^"]+)";', (docs / "assets" / name).read_text(encoding="utf-8"), re.M):
+                self.assertIn(f"./assets/{spec[2:]}", imports, f"{name}: імпарт {spec}")
 
     def test_write_json_is_atomic(self):
         path = self.root / "x.json"

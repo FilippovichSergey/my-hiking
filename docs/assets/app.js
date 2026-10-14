@@ -8,6 +8,10 @@ import { hikePhotos, hikePois } from "./pois.js";
 import { renderProfile } from "./profile.js";
 
 const PSWP_URL = "https://cdn.jsdelivr.net/npm/photoswipe@5.4.4/dist/photoswipe.esm.min.js";
+// Версія файлаў сайта (яе ставіць `hike build` у адрас гэтага модуля): з ёй бяруцца і астатнія файлы,
+// каб пасля публікацыі браўзер не змяшаў новыя файлы са старымі з кэша.
+const ASSET_QUERY = new URL(import.meta.url).search;
+const DATA_URL = document.querySelector('meta[name="hikes-data"]')?.content || "data/hikes.json";
 const DIFF_LEVEL = { easy: 1, medium: 2, hard: 3, expert: 4 };
 // узровень → сімвал у assets/difficulty-sprite.svg (сілуэт з 1–4 вяршынямі)
 const DIFF_ICON = { easy: "easy", medium: "moderate", hard: "hard", expert: "very-hard" };
@@ -22,6 +26,7 @@ const state = {
   day: null,
   view: "list", // тэлефон: што на экране — панэль ("list") ці карта ("map")
   version: "", // версія сайта з індэкса (яе запісвае `hike build` з файла VERSION)
+  share: false, // ці ёсць старонкі <мова>/<паход>/ з прэв'ю для спасылак
 };
 const trackCache = new Map();
 let map, profile, renderToken = 0;
@@ -197,7 +202,7 @@ function diffBadge(level) {
   if (!level) return null;
   return h("span", { class: "diff", dataset: { difficulty: level } },
     s("svg", { class: "diff-icon", viewBox: "0 0 32 32", "aria-hidden": "true" },
-      s("use", { href: `assets/difficulty-sprite.svg#difficulty-${DIFF_ICON[level]}` })),
+      s("use", { href: `assets/difficulty-sprite.svg${ASSET_QUERY}#difficulty-${DIFF_ICON[level]}` })),
     t("difficulty")[level]);
 }
 
@@ -354,6 +359,14 @@ async function loadTrack(hike) {
 /** Сталая спасылка на паход (з бягучай мовай). */
 function hikeUrl(hike) { return `${location.origin}${location.pathname}#/${lang}/${hike.slug}`; }
 
+/**
+ * Спасылка, якой дзеляцца: старонка <мова>/<паход>/ паказвае ў Telegram і іншых праграмах назву, лічбы
+ * і вокладку паходу і адразу пераводзіць на сайт. Калі такіх старонак няма — звычайная спасылка.
+ */
+function shareUrl(hike) {
+  return state.share ? new URL(`${lang}/${hike.slug}/`, new URL(".", location.href)).href : hikeUrl(hike);
+}
+
 /** Дні трэку для GPX: увесь паход або выбраны дзень; пусты спіс, калі трэку для яго няма. */
 function gpxTracks(hike, track, day) {
   const title = pick(hike.title);
@@ -373,7 +386,7 @@ function downloadGpx(hike, track, day) {
 }
 
 async function shareHike(hike, btn) {
-  const url = hikeUrl(hike);
+  const url = shareUrl(hike);
   if (!(await copyText(url))) {
     window.prompt(t("copyLink"), url); // буфер абмену недаступны: спасылку можна скапіяваць уручную
     return;
@@ -565,9 +578,10 @@ async function main() {
   document.getElementById("brand").addEventListener("click", (e) => { e.preventDefault(); go(null); });
   for (const b of document.querySelectorAll("[data-view-btn]")) b.addEventListener("click", () => setView(b.dataset.viewBtn));
 
-  const data = await fetch("data/hikes.json").then((r) => r.json());
+  const data = await fetch(DATA_URL).then((r) => r.json());
   state.hikes = data.hikes;
   state.version = data.version || "";
+  state.share = data.share === true;
   window.addEventListener("hashchange", route);
   route();
 }

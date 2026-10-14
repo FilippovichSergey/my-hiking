@@ -22,6 +22,7 @@ import build  # noqa: E402
 import common  # noqa: E402
 import fetch  # noqa: E402
 import geo  # noqa: E402
+import pages  # noqa: E402
 import practical  # noqa: E402
 import scaffold  # noqa: E402
 
@@ -1946,6 +1947,646 @@ class TestPhotoPlaces(PracticalProject):
         for attempt in (1, 2):
             photos = self.build()[0]["h"]["photos"]
             self.assertEqual((len(photos), [p.get("pos") for p in photos]), (3, [None, None, None]), attempt)
+
+
+class TestPhotoClock(PracticalProject):
+    """Папраўка гадзінніка камеры (поле photo_clock): месцы фота, запісы па фота і парадак галерэі."""
+
+    FOLDER = "20250601_Паход"
+
+    def rules(self, text):
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stdout", out):
+            clock = practical.photo_clock("h", yaml.safe_load(text))
+        return clock, out.getvalue()
+
+    def test_rules_shift_the_shooting_time(self):
+        clock, out = self.rules("""
+- {date: 2025-07-01, real_date: 2025-06-01}
+- {files: "DJI_*", shift: "+1h 30m"}
+- {files: ["IMG_1*", "img_2?.jpg"], date: 2025-06-02, shift: "-1d 2h"}
+""")
+        self.assertEqual(out, "")
+        got = lambda name, taken: clock(name, taken)  # noqa: E731
+        self.assertEqual(got("A.jpg", "2025-07-01T09:05:07"), "2025-06-01T09:05:07", "не той месяц у камеры")
+        self.assertEqual(got("A.jpg", "2025-07-02T09:00:00"), "2025-07-02T09:00:00", "іншая дата — без змен")
+        self.assertEqual(got("dji_0518.JPG", "2025-06-01T08:00:00"), "2025-06-01T09:30:00", "імя — без уліку рэгістра")
+        self.assertEqual(got("DJI_1.jpg", "2025-07-01T08:00:00"), "2025-06-01T08:00:00", "дзейнічае першы запіс, які падыходзіць")
+        self.assertEqual(got("IMG_123.JPG", "2025-06-02T10:00:00"), "2025-06-01T08:00:00")
+        self.assertEqual(got("IMG_21.jpg", "2025-06-02T10:00:00"), "2025-06-01T08:00:00", "імя без пашырэння таксама падыходзіць шаблону")
+        self.assertEqual(got("IMG_123.JPG", "2025-06-03T10:00:00"), "2025-06-03T10:00:00", "патрэбны і імя, і дата")
+        self.assertEqual([got("A.jpg", None), got("A.jpg", ""), got("A.jpg", "учора")], [None, "", "учора"])
+        self.assertEqual(practical.photo_clock("h", None)("A.jpg", "2025-07-01T09:00:00"), "2025-07-01T09:00:00")
+
+        # няправільныя запісы прапускаюцца з папярэджаннем, правільныя побач з імі працуюць
+        clock, out = self.rules("""
+- {date: 2025-07-01}
+- {real_date: 2025-06-01}
+- {date: "31 чэрвеня", real_date: 2025-06-01}
+- {files: 5, shift: "+1h"}
+- {files: "A*", shift: "гадзіну назад"}
+- {files: "A*", shift: 60}
+- "мінус месяц"
+- {files: "B*", shift: "-2h", camera: Canon}
+""")
+        self.assertEqual(out.count("! h: photo_clock:"), 8, out)
+        for text in ("запіс 1: няма ні real_date, ні shift", "запіс 2: real_date — сапраўдная дата для фота з датай date",
+                     "запіс 3: няправільная дата date: 31 чэрвеня", "запіс 4: files — шаблон імя або спіс шаблонаў, а не «5»",
+                     "а не «гадзіну назад»", "а не «60»", "запіс 7: чакаюцца палі", "запіс 8: невядомыя палі: camera"):
+            self.assertIn(text, out)
+        self.assertEqual((clock("A.jpg", "2025-07-01T09:00:00"), clock("B.jpg", "2025-07-01T09:00:00")),
+                         ("2025-07-01T09:00:00", "2025-07-01T07:00:00"))
+        _, out = self.rules("{date: 2025-07-01}")
+        self.assertIn("чакаецца спіс запісаў", out)
+        self.assertEqual(practical.clock_manifest({"a.jpg": {"name": "a", "taken": "2025-07-01T09:00:00"}}, self.rules(
+            "[{date: 2025-07-01, real_date: 2025-06-01}]")[0]), {"a.jpg": {"name": "a", "taken": "2025-06-01T09:00:00"}},
+            "поле, якога няма ў маніфесце, не дадаецца")
+
+    def test_build_uses_the_corrected_time(self):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))  # 08:00–12:00
+        yaml_text = (f"date: 2025-06-01\ntitle: {{be: H}}\nkomoot: [1]\nphotos_folder: {self.FOLDER}\n"
+                     "practical:\n  places:\n    - {type: shelter, photo: Cam2}\n")
+        (self.content / "h.yaml").write_text(yaml_text, encoding="utf-8")
+        for name, taken in (("Phone.jpg", "2025:06:01 10:00:00"), ("Cam1.jpg", "2025:07:01 09:00:00"), ("Cam2.jpg", "2025:07:01 11:00:00")):
+            self.photo(self.FOLDER, name, taken)
+        names = lambda index: [Path(p["src"]).stem.split("-")[0] for p in index["h"]["photos"]]  # noqa: E731
+        placed = lambda index: [p.get("pos") and (p["pos"]["km"], p["pos"]["time"]) for p in index["h"]["photos"]]  # noqa: E731
+        index, out = self.build()
+        self.assertEqual((names(index), placed(index)), (["phone", "cam1", "cam2"], [(2.0, "10:00"), None, None]))
+        self.assertIsNone(index["h"]["practical"]["places"][0]["pos"])
+        self.assertIn("фота Cam2 знята па-за часам трэку", out)
+
+        # у камеры стаяў не той месяц: з папраўкай фота стаяць па часе здымкі і трапляюць на трэк
+        (self.content / "h.yaml").write_text(yaml_text + "photo_clock:\n  - {date: 2025-07-01, real_date: 2025-06-01}\n", encoding="utf-8")
+        index, out = self.build()
+        self.assertEqual(names(index), ["cam1", "phone", "cam2"], "парадак галерэі — па сапраўдным часе")
+        self.assertEqual(placed(index), [(1.0, "09:00"), (2.0, "10:00"), (3.0, "11:00")])
+        self.assertEqual((index["h"]["practical"]["places"][0]["pos"]["km"], index["h"]["practical"]["places"][0]["photo"]), (3.0, 2))
+        self.assertNotIn("па-за часам трэку", out)
+        self.assertNotIn("фота Cam1.jpg →", out, "фота не пераціскаюцца")
+        manifest = common.read_json(build.CACHE / "photos" / "h.json")
+        self.assertEqual(manifest["Cam1.jpg"]["original"], "2025-07-01T09:00:00", "у кэшы застаецца час з фота")
+        # дыск з фота недаступны: папраўка па-ранейшаму дзейнічае (час бярэцца з маніфеста)
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.assertEqual(placed(self.build()[0]), [(1.0, "09:00"), (2.0, "10:00"), (3.0, "11:00")])
+
+
+class TestSitePages(PracticalProject):
+    """Версіі файлаў у index.html і старонкі <мова>/<паход>/ з прэв'ю для спасылак."""
+
+    INDEX = """<!doctype html>
+<html lang="be">
+<head>
+  <title>Мае паходы</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://example.org/maplibre-gl.js" defer></script>
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body></body>
+</html>
+"""
+
+    def site(self):
+        assets = build.DOCS / "assets"
+        assets.mkdir(parents=True)
+        for name, text in (("app.js", 'import { h } from "./dom.js";\n'), ("dom.js", "export const h = 1;\n"), ("style.css", "body {}\n")):
+            (assets / name).write_text(text, encoding="utf-8")
+        (build.DOCS / "index.html").write_text(self.INDEX, encoding="utf-8", newline="\n")
+        (build.DOCS / "data").mkdir()
+        (build.DOCS / "data" / "hikes.json").write_text("{}", encoding="utf-8")
+
+    def test_index_html_gets_one_version_for_all_site_files(self):
+        self.site()
+        docs, index = build.DOCS, build.DOCS / "index.html"
+        self.assertTrue(pages.stamp_index(docs))
+        text, version = index.read_text(encoding="utf-8"), pages.assets_version(docs)
+        self.assertRegex(version, r"^[0-9a-f]{10}$")
+        self.assertIn(f'<link rel="stylesheet" href="assets/style.css?v={version}">', text)
+        self.assertIn(f'<script type="module" src="assets/app.js?v={version}"></script>', text)
+        self.assertIn(f'<script type="importmap">{{"imports":{{"./assets/app.js":"./assets/app.js?v={version}",'
+                      f'"./assets/dom.js":"./assets/dom.js?v={version}"}}}}</script>', text)
+        self.assertIn(f'<meta name="hikes-data" content="data/hikes.json?v={pages.file_version(docs / "data" / "hikes.json")}">', text)
+        self.assertLess(text.index("importmap"), text.index('type="module"'), "карта імпартаў стаіць перад модулем")
+        self.assertNotIn("og:", text, "без адраса сайта прэв'ю не запісваецца")
+        self.assertIn('<script src="https://example.org/maplibre-gl.js" defer></script>', text, "астатняе не закранута")
+
+        # паўторны запуск нічога не мяняе; змена любога файла мяняе версію ўсюды, блок не падвойваецца
+        stamp = index.stat().st_mtime_ns
+        self.assertTrue(pages.stamp_index(docs))
+        self.assertEqual((index.read_text(encoding="utf-8"), index.stat().st_mtime_ns), (text, stamp))
+        (docs / "assets" / "dom.js").write_text("export const h = 2;\n", encoding="utf-8")
+        (docs / "data" / "hikes.json").write_text('{"hikes": []}', encoding="utf-8")
+        pages.stamp_index(docs, {"url": "https://example.org/hikes/", "image": "https://example.org/hikes/og/a.jpg"})
+        again, new = index.read_text(encoding="utf-8"), pages.assets_version(docs)
+        self.assertNotEqual(new, version)
+        self.assertEqual((again.count(new), again.count(version), again.count("importmap"), again.count(pages.START)), (5, 0, 1, 1))
+        self.assertIn(f'content="data/hikes.json?v={pages.file_version(docs / "data" / "hikes.json")}"', again)
+        for tag in ('<meta property="og:url" content="https://example.org/hikes/">', '<meta property="og:title" content="Мае паходы">',
+                    '<meta property="og:image" content="https://example.org/hikes/og/a.jpg">', '<meta name="twitter:card" content="summary_large_image">'):
+            self.assertIn(tag, again)
+        pages.stamp_index(docs)
+        self.assertNotIn("og:", index.read_text(encoding="utf-8"), "прэв'ю прыбіраецца разам з адрасам сайта")
+
+        # index.html нечаканага выгляду не чапаецца; без index.html зборка проста ідзе далей
+        index.write_text("<html><head></head></html>", encoding="utf-8")
+        out = io.StringIO()
+        with unittest.mock.patch("sys.stdout", out):
+            self.assertFalse(pages.stamp_index(docs))
+        self.assertEqual(index.read_text(encoding="utf-8"), "<html><head></head></html>")
+        self.assertIn("версіі файлаў не запісаныя", out.getvalue())
+        index.unlink()
+        self.assertFalse(pages.stamp_index(docs))
+
+    def test_build_makes_share_pages_with_previews(self):
+        self.site()
+        self.cfg = {**self.cfg, "site_url": "https://example.org/hikes", "photo": {**CFG["photo"], "max_size": 2000}}
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE), distance=21460, elevation_up=1007)
+        self.add_tour(2, "2025-06-02T04:00:00Z", path(*SQUARE), distance=4000, elevation_up=400)
+        (self.content / "lake.yaml").write_text(
+            'date: 2025-06-01\ntitle: {be: "Возера <Тбікелі> & \\"К°\\"", ru: Озеро, en: Lake}\nregion: {be: Аджарыя, en: Adjara}\n'
+            "difficulty: hard\nkomoot: [1, 2]\nphotos_folder: 20250601_Возера\ncover: B\n", encoding="utf-8")
+        (self.content / "plain.yaml").write_text("date: 2024-01-05\ntitle: {be: Проста}\nlocation: [41, 42]\n", encoding="utf-8")
+        for name, size in (("A.jpg", (80, 60)), ("B.jpg", (3000, 1000))):
+            target = self.photos_root / "20250601_Возера" / "Сайт" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", size, (30, 120, 200)).save(target, "JPEG")
+        index, out = self.build()
+        docs = build.DOCS
+        self.assertTrue(common.read_json(docs / "data" / "hikes.json")["share"])
+        ru = (docs / "ru" / "lake" / "index.html").read_text(encoding="utf-8")
+        image = sorted((docs / "og").glob("lake-*.jpg"))
+        self.assertEqual(len(image), 1)
+        with Image.open(image[0]) as img:
+            self.assertEqual((img.size, img.format), ((1200, 630), "JPEG"), "вокладка абрэзаная да памеру прэв'ю")
+        for tag in ('<html lang="ru">', "<title>Озеро · Мои походы</title>", '<meta property="og:title" content="Озеро">',
+                    '<meta property="og:description" content="1–2 июня 2025 · Аджария · 25,5 км · ↑ 1\u00a0407 м · 2 дня · Тяжело">',
+                    '<meta property="og:url" content="https://example.org/hikes/ru/lake/">',
+                    f'<meta property="og:image" content="https://example.org/hikes/og/{image[0].name}">',
+                    '<meta property="og:image:width" content="1200">', '<meta property="og:locale" content="ru_RU">',
+                    '<meta name="twitter:card" content="summary_large_image">',
+                    '<meta http-equiv="refresh" content="0; url=../../#/ru/lake">', 'location.replace("../../#/ru/lake");'):
+            self.assertIn(tag, ru)
+        be = (docs / "be" / "lake" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<meta property="og:title" content="Возера &lt;Тбікелі&gt; &amp; &quot;К°&quot;">', be, "назва экранаваная")
+        self.assertIn("1–2 чэрвеня 2025 · Аджарыя · 25,5 км · ↑ 1\u00a0407 м · 2 дні · Цяжка", be)
+        self.assertIn("1–2 June 2025 · Adjara · 25.5 km · ↑ 1,407 m · 2 days · Hard", (docs / "en" / "lake" / "index.html").read_text(encoding="utf-8"))
+        # паход без трэку і фота: кароткі радок, прэв'ю без карцінкі; руская назва — запасная беларуская
+        plain = (docs / "ru" / "plain" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<meta property="og:description" content="5 января 2024">', plain)
+        self.assertIn('<meta property="og:title" content="Проста">', plain)
+        self.assertNotIn("og:image", plain)
+        self.assertIn('<meta name="twitter:card" content="summary">', plain)
+        # старонка мовы і сам сайт: прэв'ю з вокладкай найноўшага паходу
+        home = (docs / "en" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<meta http-equiv="refresh" content="0; url=../#/en">', home)
+        self.assertIn(f"og/{image[0].name}", home)
+        root = (docs / "index.html").read_text(encoding="utf-8")
+        self.assertIn('<meta property="og:url" content="https://example.org/hikes/">', root)
+        self.assertIn(f'<meta property="og:image" content="https://example.org/hikes/og/{image[0].name}">', root)
+        self.assertIn(f'content="data/hikes.json?v={pages.file_version(docs / "data" / "hikes.json")}"', root, "версія даных — ужо новага індэкса")
+
+        # другая зборка нічога не перастварае; новая вокладка — новая карцінка, старая прыбіраецца
+        stamps = {p: p.stat().st_mtime_ns for p in [image[0], docs / "ru" / "lake" / "index.html"]}
+        self.build()
+        self.assertEqual({p: p.stat().st_mtime_ns for p in stamps}, stamps)
+        text = (self.content / "lake.yaml").read_text(encoding="utf-8").replace("cover: B", "cover: A")
+        (self.content / "lake.yaml").write_text(text, encoding="utf-8")
+        self.build()
+        small = sorted((docs / "og").glob("lake-*.jpg"))
+        self.assertEqual((len(small), small[0].name != image[0].name), (1, True))
+        with Image.open(small[0]) as img:
+            self.assertEqual(img.size, (80, 42), "малая вокладка не расцягваецца, толькі абразаецца")
+        self.assertIn('<meta property="og:image:width" content="80">', (docs / "be" / "lake" / "index.html").read_text(encoding="utf-8"))
+
+        # схаваны паход: яго старонкі і карцінка прыбіраюцца; без адраса сайта прыбіраецца ўсё
+        (self.content / "lake.yaml").write_text(text + "hidden: true\n", encoding="utf-8")
+        self.build()
+        self.assertEqual(sorted(p.name for p in (docs / "ru").iterdir()), ["index.html", "plain"])
+        self.assertEqual(list((docs / "og").iterdir()), [])
+        self.cfg = {k: v for k, v in self.cfg.items() if k != "site_url"}
+        self.build()
+        self.assertFalse(any((docs / name).exists() for name in ("be", "ru", "en", "og")))
+        self.assertFalse(common.read_json(docs / "data" / "hikes.json")["share"])
+        self.assertNotIn("og:", (docs / "index.html").read_text(encoding="utf-8"))
+        # няправільны адрас сайта: папярэджанне, старонак няма
+        self.cfg = {**self.cfg, "site_url": "мой сайт"}
+        self.assertIn("site_url у config.yaml: чакаецца адрас", self.build()[1])
+        self.assertFalse((docs / "ru").exists())
+
+    def test_preview_texts(self):
+        self.assertEqual([pages.num(v, lang, d) for v, lang, d in ((1007, "be", 0), (21.46, "ru", 1), (10.04, "be", 1), (1007, "en", 0), (21.46, "en", 1))],
+                         ["1\u00a0007", "21,5", "10", "1,007", "21.5"])
+        self.assertEqual([pages.plural(n, ("день", "дня", "дней"), "ru") for n in (1, 2, 5, 11, 21, 22)],
+                         ["день", "дня", "дней", "дней", "день", "дня"])
+        self.assertEqual(pages.date_range("2025-12-31", "2026-01-02", "be"), "31 снежня 2025 – 2 студзеня 2026")
+        self.assertEqual(pages.date_range("2025-05-30", "2025-06-01", "en"), "30 May – 1 June 2025")
+        self.assertEqual([pages.pick({"be": "Б", "en": "E"}, lang) for lang in ("be", "ru", "en")], ["Б", "Б", "E"])
+        self.assertEqual(pages.pick(None, "ru"), "")
+
+
+class TestReview190(PracticalProject):
+    """Рэгрэсіі па review_2026-10-14_v1.9.0.md."""
+
+    FOLDER = "20250601_Паход"
+
+    def hike(self, extra=""):
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))  # 08:00–12:00 мясцовага часу, квадрат 4 км
+        (self.content / "h.yaml").write_text(
+            f"date: 2025-06-01\ntitle: {{be: H}}\nkomoot: [1]\nphotos_folder: {self.FOLDER}\n{extra}", encoding="utf-8")
+
+    def shots(self, *photos):
+        for name, taken in photos:
+            self.photo(self.FOLDER, name, taken)
+
+    def published(self, index):
+        return [(Path(p["src"]).stem.split("-")[0], p.get("pos") and (p["pos"]["km"], p["pos"].get("time"))) for p in index["h"]["photos"]]
+
+    def test_gps_photo_takes_the_pass_made_at_shooting_time(self):  # №1
+        gps = lambda north, east=0: [round(42.0 + east * M / 0.7547, 5), round(41.0 + north * M, 5)]  # noqa: E731
+        place = lambda days, original, at: practical.photo_places(  # noqa: E731
+            [{"src": "photos/h/p.webp", "thumb": "photos/h/p-t.webp"}], {"p.jpg": {"name": "p", "original": original, "gps": at}}, days)[0]
+        km = lambda pos: (pos["day"], pos["km"], pos.get("time"), pos.get("off"))  # noqa: E731
+
+        # туды і назад адной сцежкай: 2 км на поўнач і назад за 08:00–12:00
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (2000, 0), (0, 0)))
+        days = practical.raw_days([1], 4)
+        self.assertEqual(km(place(days, "2025-06-01T09:00:00", gps(1000))), (0, 1.0, "09:00", None), "шлях туды")
+        self.assertEqual(km(place(days, "2025-06-01T11:00:00", gps(1000))), (0, 3.0, "11:00", None), "тое ж месца на шляху назад")
+        self.assertEqual(km(place(days, "2025-06-01T11:00:00", gps(1000, 40))), (0, 3.0, "11:00", 40), "GPS збоку ад сцежкі")
+        self.assertEqual(km(place(days, "2025-06-01T11:04:00", gps(1000))), (0, 3.0, "11:04", None),
+                         "гадзіннік крыху не сыходзіцца: кіламетр — месца GPS на гэтай праходцы")
+        self.assertEqual(km(place(days, "2025-06-01T07:00:00", gps(1000))), (0, 1.0, "07:00", None), "да старту — бліжэйшая па часе праходка")
+        self.assertEqual(km(place(days, "2025-06-01T13:00:00", gps(1000))), (0, 3.0, "13:00", None), "пасля фінішу")
+        self.assertEqual(km(place(days, None, gps(1000))), (0, 1.0, None, None), "без часу — проста бліжэйшае месца")
+        self.assertEqual(km(place(days, "2025-06-01T11:00:00", gps(1000, 400))), (0, 3.0, "11:00", None), "GPS далёка — месца па часе")
+
+        # два туры аднаго дня па той жа сцежцы: туды зранку, назад удзень
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (2000, 0)), duration=7200)
+        self.add_tour(2, "2025-06-01T08:00:00Z", path((2000, 0), (0, 0)))
+        days = practical.raw_days([1, 2], 4)
+        self.assertEqual(len(days[0]["segs"]), 2)
+        self.assertEqual(km(place(days, "2025-06-01T10:00:00", gps(1000))), (0, 1.0, "10:00", None))
+        self.assertEqual(km(place(days, "2025-06-01T14:00:00", gps(1000))), (0, 3.0, "14:00", None))
+
+    def test_photos_outside_the_recording_get_no_marker(self):  # №2
+        self.hike("practical:\n  places:\n    - {type: shelter, photo: Before20}\n")
+        self.shots(("Before20.jpg", "2025:06:01 07:40:00"), ("Before1.jpg", "2025:06:01 07:59:00"), ("Start.jpg", "2025:06:01 08:00:00"),
+                   ("Mid.jpg", "2025:06:01 10:00:00"), ("Finish.jpg", "2025:06:01 12:00:00"), ("After1.jpg", "2025:06:01 12:01:00"),
+                   ("After20.jpg", "2025:06:01 12:20:00"))
+        index, out = self.build()
+        self.assertEqual(self.published(index), [
+            ("before20", None), ("before1", None), ("start", (0.0, "08:00")), ("mid", (2.0, "10:00")), ("finish", (4.0, "12:00")),
+            ("after1", None), ("after20", None)], "дзе аўтар быў да старту і пасля фінішу запісу, невядома")
+        # ручны запіс практычнай часткі па тым жа фота — па-ранейшаму з допускам паўгадзіны
+        self.assertEqual(index["h"]["practical"]["places"][0]["pos"]["km"], 0.0)
+
+    def test_missing_manifest_keeps_known_photo_places(self):  # №3
+        self.hike()
+        self.shots(("A.jpg", "2025:06:01 09:00:00"), ("B.jpg", "2025:06:01 11:00:00"), ("Eve.jpg", "2025:05:31 19:00:00"))
+        placed = self.published(self.build()[0])
+        self.assertEqual(placed, [("eve", None), ("a", (1.0, "09:00")), ("b", (3.0, "11:00"))])
+
+        # праект скланаваны на іншы камп'ютар: кэша фота няма, дыск з арыгіналамі недаступны, туры спампаваныя нанова
+        manifest = build.CACHE / "photos" / "h.json"
+        saved = manifest.read_text(encoding="utf-8")
+        manifest.unlink()
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        for attempt in (1, 2):
+            self.assertEqual(self.published(self.build()[0]), placed, f"зборка {attempt}: вядомыя месцы застаюцца")
+        # папраўка гадзінніка змянілася, а пералічыць няма з чаго: ранейшыя месцы да яе ўжо не адносяцца
+        text = (self.content / "h.yaml").read_text(encoding="utf-8")
+        (self.content / "h.yaml").write_text(text + "photo_clock:\n  - {shift: \"+1h\"}\n", encoding="utf-8")
+        self.assertEqual([pos for _, pos in self.published(self.build()[0])], [None, None, None])
+        (self.content / "h.yaml").write_text(text, encoding="utf-8")
+        self.assertEqual([pos for _, pos in self.published(self.build()[0])], [None, None, None], "страчанае само не вяртаецца")
+
+        # з маніфестам месцы лічацца нанова; пасля змены трэку без маніфеста ранейшыя месцы не падыходзяць
+        manifest.write_text(saved, encoding="utf-8")
+        self.assertEqual(self.published(self.build()[0]), placed)
+        manifest.unlink()
+        self.add_tour(1, "2025-06-01T05:00:00Z", path(*SQUARE))
+        self.assertEqual([pos for _, pos in self.published(self.build()[0])], [None, None, None], "трэк іншы — ранейшыя месцы састарэлі")
+        # кантроль: трэк прыбраны з паходу — месцаў няма і з маніфестам
+        manifest.write_text(saved, encoding="utf-8")
+        self.assertEqual(self.published(self.build()[0])[1][1], (0.0, "09:00"))
+        (self.content / "h.yaml").write_text(
+            f"date: 2025-06-01\ntitle: {{be: H}}\nkomoot: []\nlocation: [41, 42]\nphotos_folder: {self.FOLDER}\n", encoding="utf-8")
+        self.assertEqual([pos for _, pos in self.published(self.build()[0])], [None, None, None])
+
+    def test_clock_correction_reorders_the_gallery_without_originals(self):  # №4
+        def result(yaml_extra, offline):
+            """Парадак галерэі, вокладка і месцы пасля дадання папраўкі — з арыгіналамі і без іх."""
+            self.tearDown()
+            self.setUp()
+            self.hike()
+            self.shots(("Phone.jpg", "2025:06:01 10:00:00"), ("Cam.jpg", "2025:07:01 09:00:00"), ("Cam2.jpg", "2025:07:01 11:30:00"))
+            first = self.build()[0]["h"]
+            self.assertEqual(([n for n, _ in self.published({"h": first})], first["cover"]), (["phone", "cam", "cam2"], 0))
+            (self.content / "h.yaml").write_text(
+                (self.content / "h.yaml").read_text(encoding="utf-8") + yaml_extra + "photo_clock:\n  - {date: 2025-07-01, real_date: 2025-06-01}\n",
+                encoding="utf-8")
+            if offline:
+                self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+            h = self.build()[0]["h"]
+            names = [n for n, _ in self.published({"h": h})]
+            return names, names[h["cover"]], [pos for _, pos in self.published({"h": h})]
+
+        online = result("", offline=False)
+        self.assertEqual(online, (["cam", "phone", "cam2"], "cam", [(1.0, "09:00"), (2.0, "10:00"), (3.5, "11:30")]))
+        self.assertEqual(result("", offline=True), online, "без арыгіналаў — той жа парадак і тая ж вокладка")
+        chosen = result("cover: Phone\n", offline=False)
+        self.assertEqual((chosen[0], chosen[1]), (["cam", "phone", "cam2"], "phone"))
+        self.assertEqual(result("cover: Phone\n", offline=True), chosen, "зададзеная вокладка застаецца тым жа фота")
+
+        # пра адно з фота ў маніфесце нічога няма: парадак застаецца ранейшы
+        self.tearDown()
+        self.setUp()
+        self.hike()
+        self.shots(("Phone.jpg", "2025:06:01 10:00:00"), ("Cam.jpg", "2025:07:01 09:00:00"))
+        self.build()
+        manifest = common.read_json(build.CACHE / "photos" / "h.json")
+        del manifest["Phone.jpg"]
+        common.write_json(build.CACHE / "photos" / "h.json", manifest)
+        (self.content / "h.yaml").write_text(
+            (self.content / "h.yaml").read_text(encoding="utf-8") + "photo_clock:\n  - {date: 2025-07-01, real_date: 2025-06-01}\n", encoding="utf-8")
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.assertEqual([n for n, _ in self.published(self.build()[0])], ["phone", "cam"])
+
+
+class TestReview191(PracticalProject):
+    """Рэгрэсіі па review_2026-10-14_v1.9.1.md."""
+
+    FOLDER, hike, shots, published = TestReview190.FOLDER, TestReview190.hike, TestReview190.shots, TestReview190.published
+
+    def fresh(self, extra, *photos):
+        """Новы часовы праект з адным паходам (квадрат 4 км, 08:00–12:00) і фота; вяртае індэкс першай зборкі."""
+        self.tearDown()
+        self.setUp()
+        self.hike(extra)
+        self.shots(*photos)
+        return self.build()[0]
+
+    def offline(self, manifest=True):
+        """Дыск з арыгіналамі адключаны; без маніфеста — як у праекце, скланаваным на іншы камп'ютар."""
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        if not manifest:
+            (build.CACHE / "photos" / "h.json").unlink()
+
+    def edit(self, old, new):
+        text = (self.content / "h.yaml").read_text(encoding="utf-8")
+        (self.content / "h.yaml").write_text(text.replace(old, new) if old else text + new, encoding="utf-8")
+
+    def test_gps_photo_near_a_turnaround_takes_the_pass_made_at_shooting_time(self):  # працяг №1 з review 1.9.0
+        gps = lambda north, east=0: [round(42.0 + east * M / 0.7547, 5), round(41.0 + north * M, 5)]  # noqa: E731
+        place = lambda days, original, at: practical.photo_places(  # noqa: E731
+            [{"src": "photos/h/p.webp", "thumb": "photos/h/p-t.webp"}], {"p.jpg": {"name": "p", "original": original, "gps": at}}, days)[0]
+        km = lambda pos: (pos["km"], pos.get("time"), pos.get("off"))  # noqa: E731
+
+        # туды і назад адной сцежкай, разварот на 2 км у 10:00; звычайны трэк і разрэджаны (тры пункты на ўвесь шлях)
+        for step, count in ((20.0, 201), (5000.0, 3)):
+            self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (2000, 0), (0, 0), step=step))
+            days = practical.raw_days([1], 4)
+            self.assertEqual(len(days[0]["segs"][0]), count)
+            # фота за 200 і за 100 м да развароту: увесь шлях паміж дзвюма праходкамі бліжэй за 300 м ад фота
+            self.assertEqual(km(place(days, "2025-06-01T09:48:00", gps(1800))), (1.8, "09:48", None), count)
+            self.assertEqual(km(place(days, "2025-06-01T10:12:00", gps(1800))), (2.2, "10:12", None), count)
+            self.assertEqual(km(place(days, "2025-06-01T09:54:00", gps(1900))), (1.9, "09:54", None), count)
+            self.assertEqual(km(place(days, "2025-06-01T10:06:00", gps(1900))), (2.1, "10:06", None), count)
+            self.assertEqual(km(place(days, "2025-06-01T10:12:00", gps(1800, 40))), (2.2, "10:12", 40), "GPS збоку ад сцежкі")
+            self.assertEqual(km(place(days, "2025-06-01T10:00:00", gps(2000))), (2.0, "10:00", None), "сам разварот")
+            self.assertEqual(km(place(days, None, gps(1800))), (1.8, None, None), "без часу — проста бліжэйшае месца")
+
+        # серпанцін: 1 км на поўнач, 20 м убок і назад; фота за 100 м да павароту аднолькава блізка да абодвух
+        # віткоў, і трэк паміж імі не выходзіць з радыуса 300 м — віток выбірае час
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (1000, 0), (1000, 20), (0, 20)))
+        days = practical.raw_days([1], 4)
+        self.assertEqual(km(place(days, "2025-06-01T09:47:00", gps(900, 10))), (0.9, "09:47", None))
+        self.assertEqual(km(place(days, "2025-06-01T10:13:00", gps(900, 10))), (1.1, "10:13", None))
+        # віткі за 100 м адзін ад аднаго, фота на першым: другі віток — не месца здымкі, нават калі па гадзінніку
+        # камеры ён бліжэй (гадзіннік мог спяшацца на паўгадзіны)
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (1000, 0), (1000, 100), (0, 100)))
+        days = practical.raw_days([1], 4)
+        self.assertEqual(km(place(days, "2025-06-01T09:43:00", gps(900))), (0.9, "09:43", None))
+        self.assertEqual(km(place(days, "2025-06-01T10:17:00", gps(900))), (0.9, "10:17", None))
+        # туды і назад рознымі сцежкамі за 200 м: паміж праходкамі трэк выходзіць з радыуса — гэта два асобныя
+        # знаходжанні каля месца з розніцай у гадзіны, і выбірае час, як і раней
+        self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (2000, 0), (2000, 200), (0, 200)))
+        days = practical.raw_days([1], 4)
+        self.assertEqual(km(place(days, "2025-06-01T09:00:00", gps(1000))), (1.0, "09:00", None))
+        self.assertEqual(km(place(days, "2025-06-01T11:03:00", gps(1000))), (3.2, "11:03", 200))
+
+    def test_known_photo_places_do_not_survive_any_change_of_the_track(self):  # №1
+        square = coords(path(*SQUARE))
+        changes = {
+            "геаметрыя": [[lat, lng + 0.1, alt, t] for lat, lng, alt, t in square],
+            "вышыня": [[lat, lng, alt + 100, t] for lat, lng, alt, t in square],
+            "час паміж стартам і фінішам": [[lat, lng, alt, round((t / 14400000) ** 2 * 14400000)] for lat, lng, alt, t in square],
+        }
+        for what, changed in changes.items():
+            self.assertEqual((len(changed), changed[0][3], changed[-1][3]), (len(square), square[0][3], square[-1][3]),
+                             "колькасць пунктаў і межы тура па часе тыя ж")
+            placed = self.published(self.fresh("", ("A.jpg", "2025:06:01 09:00:00"), ("B.jpg", "2025:06:01 11:00:00")))
+            self.assertEqual(placed, [("a", (1.0, "09:00")), ("b", (3.0, "11:00"))])
+            key = self.build()[0]["h"]["photoKey"]
+            self.offline(manifest=False)
+            self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))  # тур спампаваны нанова, без змен
+            index = self.build()[0]
+            self.assertEqual((self.published(index), index["h"]["photoKey"]), (placed, key), "нязменны тур: вядомыя месцы застаюцца")
+            self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE), coords=changed)
+            index = self.build()[0]
+            self.assertEqual(self.published(index), [("a", None), ("b", None)], what)
+            self.assertNotEqual(index["h"]["photoKey"], key, what)
+
+    def test_practical_places_by_photo_follow_the_clock_and_the_track(self):  # №2
+        notes = ("practical:\n  water:\n    sources:\n      - {type: spring, photo: A}\n"
+                 "  places:\n    - {type: shelter, photo: A}\n    - {type: table, km: 2.5}\n")
+        known = [(1.0, "09:00"), (1.0, "09:00"), (2.5, "10:30")]  # крыніца і альтанка — па фота, стол — па кіламетры
+
+        def where(index):
+            block = index["h"]["practical"]
+            return [item["pos"] and (item["pos"]["km"], item["pos"].get("time")) for item in block["water"]["sources"] + block["places"]]
+
+        def cloned():
+            """Праект без маніфеста і арыгіналаў: пакуль нічога не змянілася, месцы застаюцца."""
+            self.assertEqual(where(self.fresh(notes, ("A.jpg", "2025:06:01 09:00:00"))), known)
+            self.offline(manifest=False)
+            for attempt in (1, 2):
+                self.assertEqual(where(self.build()[0]), known, f"зборка {attempt}")
+
+        # дададзена папраўка гадзінніка: месца па фота палічана яшчэ без яе
+        cloned()
+        self.edit("", 'photo_clock:\n  - {shift: "+1h"}\n')
+        index, out = self.build()
+        self.assertEqual(where(index), [None, None, known[2]])
+        self.assertEqual(out.count("ранейшае месца па фота A састарэла"), 2, out)
+        self.assertEqual([item["photo"] for item in index["h"]["practical"]["places"]], [0, None], "само фота ў запісе застаецца")
+        self.assertEqual(where(self.build()[0]), [None, None, known[2]], "страчанае само не вяртаецца")
+        self.cfg = {**self.cfg, "photos_root": str(self.photos_root)}  # арыгіналы зноў даступныя
+        self.assertEqual(where(self.build()[0]), [(2.0, "10:00"), (2.0, "10:00"), known[2]])
+
+        # змяніўся трэк: той жа маршрут запісаны на гадзіну пазней
+        cloned()
+        self.add_tour(1, "2025-06-01T05:00:00Z", path(*SQUARE))
+        index, out = self.build()
+        self.assertEqual(where(index), [None, None, (2.5, "11:30")])
+        self.assertEqual(out.count("ранейшае месца па фота A састарэла"), 2, out)
+
+        # тура няма ў кэшы, на сайце застаецца ранейшы трэк: месцы ранейшыя, пакуль папраўка гадзінніка тая ж
+        self.assertEqual(where(self.fresh(notes, ("A.jpg", "2025:06:01 09:00:00"))), known)
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        for attempt in (1, 2):
+            index, out = self.build()
+            self.assertIn("застаецца апублікаваны раней трэк", out)
+            self.assertEqual((where(index), self.published(index)), (known, [("a", (1.0, "09:00"))]), f"зборка {attempt}")
+        self.edit("", 'photo_clock:\n  - {shift: "+1h"}\n')
+        index, out = self.build()
+        self.assertEqual((where(index), self.published(index)), ([None, None, known[2]], [("a", None)]))
+        self.assertIn("месцы фота на карце прыбраны", out)
+        self.assertEqual(out.count("ранейшае месца па фота A састарэла"), 2, out)
+        self.edit('photo_clock:\n  - {shift: "+1h"}\n', "")
+        index = self.build()[0]
+        self.assertEqual((where(index), self.published(index)), ([None, None, known[2]], [("a", None)]), "страчанае само не вяртаецца")
+
+    def test_removed_cover_gives_the_first_photo_without_originals(self):  # №3
+        def covers(change):
+            first = self.fresh("cover: B\n", ("A.jpg", "2025:06:01 09:00:00"), ("B.jpg", "2025:06:01 11:00:00"))
+            self.assertEqual(([name for name, _ in self.published(first)], first["h"]["cover"]), (["a", "b"], 1))
+            self.edit("cover: B\n", "")
+            change()
+            found = []
+            for attempt in (1, 2):
+                h = self.build()[0]["h"]
+                found.append(([Path(p["src"]).stem.split("-")[0] for p in h["photos"]], h["cover"]))
+            return found
+
+        def broken():  # крыніца ёсць, але фота не чытаюцца, а маніфеста няма: фота аднаўляюцца з індэкса
+            (build.CACHE / "photos" / "h.json").unlink()
+            for name in ("A.jpg", "B.jpg"):
+                (self.photos_root / self.FOLDER / "Сайт" / name).write_bytes(b"broken")
+
+        auto = [(["a", "b"], 0)] * 2
+        self.assertEqual(covers(lambda: None), auto, "з арыгіналамі")
+        self.assertEqual(covers(self.offline), auto, "без арыгіналаў — тое ж першае фота па часе")
+        self.assertEqual(covers(lambda: self.offline(manifest=False)), auto, "і без маніфеста")
+        self.assertEqual(covers(broken), auto, "фота не чытаюцца")
+
+
+class TestReview192(FetchProject):
+    """Рэгрэсіі па review_2026-10-14_v1.9.2.md."""
+
+    FOLDER = "20250601_Паход"
+
+    def with_photos(self, cover):
+        """Новы часовы праект: квадрат 4 км і фота A (09:00) і B (11:00); вяртае паход з індэкса першай зборкі."""
+        self.tearDown()
+        self.setUp()
+        self.hike(f"photos_folder: {self.FOLDER}\ncover: {cover}\n")
+        self.photo(self.FOLDER, "A.jpg", "2025:06:01 09:00:00")
+        self.photo(self.FOLDER, "B.jpg", "2025:06:01 11:00:00")
+        return self.build()[0]["h"]
+
+    def set_cover(self, cover):
+        path_ = self.content / "h.yaml"
+        lines = [line for line in path_.read_text(encoding="utf-8").splitlines() if not line.startswith("cover:")]
+        path_.write_text("\n".join(lines + [f"cover: {cover}"]) + "\n", encoding="utf-8")
+
+    def test_chosen_cover_is_found_when_the_index_holds_a_thumbnail(self):  # №1
+        for cover in ("A.jpg", "A"):  # імя з пашырэннем і без яго
+            first = self.with_photos("B")
+            self.assertEqual(([Path(p["src"]).stem.split("-")[0] for p in first["photos"]], first["cover"]), (["a", "b"], 1))
+            self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+            (build.DOCS / first["photos"][0]["src"]).unlink()  # страчана поўная копія першага фота
+            h = self.build()[0]["h"]
+            self.assertEqual((h["photos"][0]["src"], h["cover"]), (first["photos"][0]["thumb"], 1), "у індэксе замест яе мініяцюра")
+            self.set_cover(cover)
+            for manifest in ("з маніфестам", "без маніфеста"):
+                if manifest == "без маніфеста":
+                    (build.CACHE / "photos" / "h.json").unlink()
+                for attempt in (1, 2):
+                    h = self.build()[0]["h"]
+                    self.assertEqual((h["cover"], h["photos"][0]["src"]), (0, first["photos"][0]["thumb"]), (cover, manifest, attempt))
+            self.set_cover("B")
+            self.assertEqual(self.build()[0]["h"]["cover"], 1, "і назад")
+
+        # фота, якое само завецца на «-t» (імя без хэша — са старой версіі) і засталося без мініяцюры: у індэксе
+        # яно выглядае гэтак жа, як мініяцюра фота «x», але яго імя ёсць у маніфесце
+        self.tearDown()
+        self.setUp()
+        self.cfg = {**self.cfg, "photos_root": str(self.root / "няма")}
+        self.hike(f"photos_folder: {self.FOLDER}\ncover: X-T.JPG\n")
+        out = build.DOCS / "photos" / "h"
+        out.mkdir(parents=True)
+        for name in ("x-t", "b", "b-t"):
+            Image.new("RGB", (40, 30)).save(out / f"{name}.webp", "WEBP")
+        common.write_json(build.CACHE / "photos" / "h.json", {
+            key: {"name": name, "w": 40, "h": 30, "taken": taken, "original": taken, "mtime": 0, "size": 0, "gps": None}
+            for key, name, taken in (("B.JPG", "b", "2025-06-01T09:00:00"), ("X-T.JPG", "x-t", "2025-06-01T11:00:00"))})
+        photos = [{"src": "photos/h/b.webp", "thumb": "photos/h/b-t.webp", "w": 40, "h": 30},
+                  {"src": "photos/h/x-t.webp", "thumb": "photos/h/x-t.webp", "w": 40, "h": 30}]
+        common.write_json(build.DOCS / "data" / "hikes.json", {"hikes": [
+            {"slug": "h", "photos": photos, "cover": 0, "point": None, "lines": [], "track": None, "days": []}]})
+        for attempt in (1, 2):
+            h = self.build()[0]["h"]
+            self.assertEqual(([p["src"] for p in h["photos"]], h["cover"]), (["photos/h/b.webp", "photos/h/x-t.webp"], 1), attempt)
+
+    def test_kept_hints_give_way_to_the_places_marked_by_the_author(self):  # №2
+        self.hike("practical:\n  places:\n    - {type: swing, km: 1}\n")
+        shelter = osm_node(77, 1000, 0, amenity="shelter")
+        self.fetch(osm=[shelter, VIEW, SPRING])
+        hints = lambda index: [(h["type"], h["pos"]["km"]) for h in index["h"]["hints"]]  # noqa: E731
+        self.assertEqual(hints(self.build()[0]), [("spring", 0.5), ("shelter", 1.0), ("viewpoint", 1.5)])
+
+        # тура больш няма ў кэшы: на сайце застаюцца ранейшыя трэк і падказкі
+        (build.CACHE / "komoot" / "tours" / "1.json").unlink()
+        index, out = self.build()
+        self.assertIn("застаецца апублікаваны раней трэк", out)
+        self.assertEqual(hints(index), [("spring", 0.5), ("shelter", 1.0), ("viewpoint", 1.5)], "арэлі — не альтанка")
+        # аўтар пазначыў альтанку сам — падказка пра яе больш не патрэбная; астатнія застаюцца
+        text = (self.content / "h.yaml").read_text(encoding="utf-8")
+        (self.content / "h.yaml").write_text(text.replace("type: swing", "type: shelter"), encoding="utf-8")
+        for attempt in (1, 2):
+            index = self.build()[0]
+            self.assertEqual(hints(index), [("spring", 0.5), ("viewpoint", 1.5)], attempt)
+            self.assertEqual([(p["type"], p["pos"]["km"]) for p in index["h"]["practical"]["places"]], [("shelter", 1.0)])
+        # тур вярнуўся ў кэш: вынік той самы, што і пры поўным разліку
+        self.add_tour(1, "2025-06-01T04:00:00Z", path(*SQUARE))
+        self.assertEqual(hints(self.build()[0]), [("spring", 0.5), ("viewpoint", 1.5)])
+
+    def test_gps_photo_aside_of_a_turnaround_takes_the_pass_made_at_shooting_time(self):  # працяг №1 з review 1.9.0
+        gps = lambda north, east=0: [round(42.0 + east * M / 0.7547, 5), round(41.0 + north * M, 5)]  # noqa: E731
+        place = lambda days, original, at: practical.photo_places(  # noqa: E731
+            [{"src": "photos/h/p.webp", "thumb": "photos/h/p-t.webp"}], {"p.jpg": {"name": "p", "original": original, "gps": at}}, days)[0]
+        km = lambda pos: (pos["km"], pos.get("time"), pos.get("off"))  # noqa: E731
+        exact = lambda days, hour, minute, at: round(practical._project_at_time(  # noqa: E731
+            at[1], at[0], days, datetime(2025, 6, 1, hour, minute, tzinfo=TZ).timestamp(), practical.PHOTO_GPS_M)[2][4], 2)
+
+        # туды і назад адной сцежкай, разварот на 2 км у 10:00; звычайны трэк і разрэджаны (тры пункты на ўвесь шлях)
+        for step, count in ((20.0, 201), (5000.0, 3)):
+            self.add_tour(1, "2025-06-01T04:00:00Z", path((0, 0), (2000, 0), (0, 0), step=step))
+            days = practical.raw_days([1], 4)
+            self.assertEqual(len(days[0]["segs"][0]), count)
+            # GPS за 250 м убок ад сцежкі, за 100 м да развароту: у развароце адлегласць да яго расце толькі з 250 да 269 м
+            self.assertEqual(km(place(days, "2025-06-01T09:54:00", gps(1900, 250))), (1.9, "09:54", 250), count)
+            self.assertEqual(km(place(days, "2025-06-01T10:06:00", gps(1900, 250))), (2.1, "10:06", 250), count)
+            self.assertEqual(km(place(days, "2025-06-01T09:00:00", gps(1000, 290)))[:2], (1.0, "09:00"), count)
+            self.assertEqual(km(place(days, "2025-06-01T11:00:00", gps(1000, 290)))[:2], (3.0, "11:00"), count)
+            # фота за 50 і за 20 м да развароту — таксама дзве праходкі; бліжэй за 15 м — ужо адна
+            self.assertEqual((exact(days, 9, 57, gps(1950)), exact(days, 10, 3, gps(1950))), (1.95, 2.05), count)
+            self.assertEqual((exact(days, 9, 59, gps(1980)), exact(days, 10, 1, gps(1980))), (1.98, 2.02), count)
+            self.assertIn((exact(days, 9, 59, gps(1990)), exact(days, 10, 1, gps(1990))), ((1.99, 1.99), (2.01, 2.01)), count)
+
+        # трэк, які дрыжыць на 3 м управа і ўлева на кожным кроку: праходак па-ранейшаму дзве, месцы тыя ж
+        shaky = [(lat, lng + (3 if i % 2 else -3) * M / 0.7547) for i, (lat, lng) in enumerate(path((0, 0), (2000, 0), (0, 0)))]
+        self.add_tour(1, "2025-06-01T04:00:00Z", shaky)
+        days = practical.raw_days([1], 4)
+        for at, there, back in ((gps(1000), (9, 0), (11, 0)), (gps(1000, 40), (9, 0), (11, 0)), (gps(1900, 250), (9, 54), (10, 6))):
+            self.assertEqual(len(practical._passes(at[1], at[0], days, practical.PHOTO_GPS_M)), 2, at)
+            for real in (there, back):  # калі аўтар сапраўды быў каля гэтага месца
+                moment = datetime(2025, 6, 1, *real)
+                want = practical._by_time(days, moment.replace(tzinfo=TZ).timestamp(), tolerance=0)["km"]
+                for clock_error in (0, 4):  # гадзіннік камеры дакладны або спяшаецца на чатыры хвіліны
+                    shot = (moment + timedelta(minutes=clock_error)).isoformat()
+                    self.assertEqual(place(days, shot, at)["km"], want, (at, real, clock_error))
 
 
 if __name__ == "__main__":

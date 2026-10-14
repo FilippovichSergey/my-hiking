@@ -12,6 +12,7 @@ import json
 import math
 import re
 from datetime import date, datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from common import CACHE, has_track, iso_date, lat_lng, photo_name, read_json, text_pair, tour_local_datetime
@@ -462,6 +463,30 @@ def osm_item(element: dict) -> dict | None:
             "osm": f"{element.get('type', 'node')}/{element.get('id')}"}
 
 
+def _author_places(author: dict | None) -> list[tuple]:
+    """Запісы аўтара з месцам: любая яго крыніца вады супадае з вадой з OSM, месца — толькі таго ж тыпу."""
+    own = [("water", None, s["pos"]) for s in ((author or {}).get("water") or {}).get("sources") or [] if s.get("pos")]
+    return own + [("place", s.get("type"), s["pos"]) for s in (author or {}).get("places") or [] if s.get("pos")]
+
+
+def _marked_by_author(kind: str, type_: str, pos: dict, own: list[tuple]) -> bool:
+    """Аўтар ужо пазначыў гэтае месца сам: запіс таго ж роду побач або на тым жа кіламетры. pos — месца падказкі,
+    яго `at` — сам аб'ект OpenStreetMap."""
+    return any(mine_kind == kind and mine_type in (None, type_)
+               and (haversine(pos["at"][1], pos["at"][0], mine["at"][1], mine["at"][0]) <= OSM_SAME_M
+                    or (mine["day"] == pos["day"] and abs(mine["km"] - pos["km"]) <= OSM_SAME_KM))
+               for mine_kind, mine_type, mine in own)
+
+
+def kept_hints(hints: list, author: dict | None) -> list[dict]:
+    """Падказкі з папярэдняга індэкса — для паходу, трэк якога застаўся ранейшы (тура няма ў кэшы), — без тых,
+    што аўтар з таго часу пазначыў сам. Новых падказак без трэку не знайсці: яны з'явяцца, калі тур вернецца."""
+    own = _author_places(author)
+    return [hint for hint in hints
+            if not (isinstance(hint, dict) and isinstance(hint.get("pos"), dict)
+                    and _marked_by_author(hint.get("kind"), hint.get("type"), hint["pos"], own))]
+
+
 def osm_hints(items: list[dict], days: list[dict], author: dict | None) -> list[dict]:
     """Падказкі каля трэку: з месцам на ім, без тых, што аўтар ужо пазначыў сам. Не праверана аўтарам."""
     if not days or not items:
@@ -477,9 +502,7 @@ def osm_hints(items: list[dict], days: list[dict], author: dict | None) -> list[
                     kept.append(p)
             segs.append(kept)
         thin.append({"segs": segs})
-    # запісы аўтара: любая яго крыніца вады супадае з вадой з OSM, месца — толькі таго ж тыпу
-    own = [("water", None, s["pos"]) for s in ((author or {}).get("water") or {}).get("sources") or [] if s.get("pos")]
-    own += [("place", s.get("type"), s["pos"]) for s in (author or {}).get("places") or [] if s.get("pos")]
+    own = _author_places(author)
     hints = []
     for item in items:
         limit = OSM_WATER_M if item["kind"] == "water" else OSM_PLACE_M
@@ -489,11 +512,8 @@ def osm_hints(items: list[dict], days: list[dict], author: dict | None) -> list[
         pos, _ = locate({"at": [item["lat"], item["lng"]]}, days, {})
         if pos is None or pos.get("off", 0) > limit:
             continue
-        if any(kind == item["kind"] and type_ in (None, item["type"])
-               and (haversine(item["lat"], item["lng"], mine["at"][1], mine["at"][0]) <= OSM_SAME_M
-                    or (mine["day"] == pos["day"] and abs(mine["km"] - pos["km"]) <= OSM_SAME_KM))
-               for kind, type_, mine in own):
-            continue  # аўтар ужо пазначыў гэтае месца сам
+        if _marked_by_author(item["kind"], item["type"], pos, own):
+            continue
         pos.pop("time", None)  # час праходу побач — не час наведвання
         hints.append({"kind": item["kind"], "type": item["type"], "name": item["name"], "osm": item["osm"], "pos": pos})
     hints.sort(key=lambda h: (h["pos"]["day"], h["pos"]["km"], h["osm"]))
@@ -553,32 +573,95 @@ def _project(lat: float, lng: float, days: list[dict], only: int | None = None) 
     трэку месца проста на сцежцы інакш лічылася б далёкім. Разрыў паміж турамі — не адрэзак маршруту.
     Вышыня, час і кіламетр — па прамой паміж канцамі адрэзка. None, калі ў трэку няма пунктаў.
     """
+    best = min(_nearest_on_segments(lat, lng, days, only), key=lambda found: found[0], default=None)
+    if best is None:
+        return None
+    d2, di, _, a, b, part, _ = best
+    return math.sqrt(d2), di, _between(a, b, part)
+
+
+def _nearest_on_segments(lat: float, lng: float, days: list[dict], only: int | None = None):
+    """Для кожнага адрэзка трэку па парадку — найбліжэйшае да каардынат месца на ім:
+    (квадрат адлегласці ў м², індэкс дня, нумар тура ў дні, пачатак адрэзка, яго канец, доля ад пачатку,
+    квадрат адлегласці да канца адрэзка). Першы пункт тура — адрэзак з аднаго пункта."""
     scale = math.pi / 180 * EARTH_R
     cos0 = math.cos(math.radians(lat))
-    best = None
     for di, day in enumerate(days):
         if only is not None and di != only:
             continue
-        for seg in day["segs"]:
+        for si, seg in enumerate(day["segs"]):
             before = None
             for p in seg:
                 x, y = (p[1] - lng) * cos0 * scale, (p[0] - lat) * scale  # метры ад шуканага месца
                 if before is None:
-                    found = (x * x + y * y, di, p, p, 0.0)
+                    yield x * x + y * y, di, si, p, p, 0.0, x * x + y * y
                 else:
                     ax, ay, a = before
                     dx, dy = x - ax, y - ay
                     length2 = dx * dx + dy * dy
                     part = max(0.0, min(1.0, -(ax * dx + ay * dy) / length2)) if length2 else 0.0
                     cx, cy = ax + part * dx, ay + part * dy
-                    found = (cx * cx + cy * cy, di, a, p, part)
-                if best is None or found[0] < best[0]:
-                    best = found
+                    yield cx * cx + cy * cy, di, si, a, p, part, x * x + y * y
                 before = (x, y, p)
-    if best is None:
-        return None
-    d2, di, a, b, part = best
-    return math.sqrt(d2), di, _between(a, b, part)
+
+
+PHOTO_PASS_M = 30  # запас у метрах: калі трэк вярнуўся назад (новая праходка) і калі праходка яшчэ «гэтак жа блізка»
+
+
+def _passes(lat: float, lng: float, days: list[dict], within: float) -> list[tuple]:
+    """Праходкі трэку каля каардынат, не далей за `within` метраў: найбліжэйшае месца кожнай (запісы як
+    у _nearest_on_segments).
+
+    Пакуль трэк не выйшаў з радыуса `within`, аўтар увесь час побач з месцам — гэта адно знаходжанне. За яго трэк
+    можа прайсці каля месца некалькі разоў: туды і назад праз разварот, па суседніх вітках серпанціну. Новая
+    праходка пачынаецца, калі трэк вярнуўся назад: шлях па ім ад найбліжэйшага месца бягучай праходкі стаў
+    прыкметна даўжэйшы за прамую — больш як на чвэрць (столькі можа дадаць дрыжанне GPS) і яшчэ на PHOTO_PASS_M
+    метраў. Такая мера не залежыць ад таго, як далёка ўбок ад сцежкі пункт GPS.
+    З праходак аднаго знаходжання застаюцца тыя, што не больш як на PHOTO_PASS_M далейшыя за найбліжэйшую: яны
+    ідуць з розніцай у хвіліны, і суседні віток серпанціну за сто метраў — не месца здымкі, нават калі па
+    гадзінніку камеры ён бліжэй.
+    """
+    passes, stay = [], []  # stay: праходкі бягучага знаходжання — (квадрат адлегласці, запіс, найбліжэйшае месца)
+    limit, tour = within * within, None
+
+    def leave():
+        """Трэк выйшаў з радыуса або тур скончыўся: знаходжанне закрываецца."""
+        if stay:
+            near = (math.sqrt(min(d2 for d2, _, _ in stay)) + PHOTO_PASS_M) ** 2
+            passes.extend(found for d2, found, _ in stay if d2 <= near)
+            stay.clear()
+
+    for found in _nearest_on_segments(lat, lng, days):
+        if found[1:3] != tour:
+            leave()
+            tour = found[1:3]
+        if found[0] <= limit:
+            point = _between(*found[3:6])
+            best = stay[-1][2] if stay else None
+            along = abs(point[4] - best[4]) * 1000 if best else 0.0  # шлях па трэку ад найбліжэйшага месца праходкі
+            if best and along <= 1.25 * haversine(point[0], point[1], best[0], best[1]) + PHOTO_PASS_M:
+                if found[0] < stay[-1][0]:
+                    stay[-1] = (found[0], found, point)  # тая ж праходка, а месца бліжэйшае
+            else:
+                stay.append((found[0], found, point))
+        if found[6] > limit:
+            leave()
+    leave()
+    return passes
+
+
+def _project_at_time(lat: float, lng: float, days: list[dict], ts: float, within: float) -> tuple | None:
+    """Як _project, але з некалькіх праходак каля каардынат выбіраецца бліжэйшая па часе да моманту `ts`.
+
+    На маршруце «туды і назад» трэк праходзіць праз адно месца двойчы; геаметрычна абедзве праходкі аднолькава
+    блізкія, і без часу фота са зваротнага шляху атрымала б кіламетр шляху туды. Што лічыцца праходкай —
+    гл. _passes. None, калі трэк не падыходзіць бліжэй за `within` метраў.
+    """
+    places = [(math.sqrt(found[0]), found[1], _between(*found[3:6])) for found in _passes(lat, lng, days, within)]
+    timed = [place for place in places if place[2][3] is not None]
+    if timed:
+        return min(timed, key=lambda place: (abs(place[2][3] - ts), place[0]))
+    return min(places, key=lambda place: place[0], default=None)
 
 
 def _between(a: tuple, b: tuple, part: float) -> tuple:
@@ -604,18 +687,138 @@ def _at_km(day: dict, km: float) -> tuple:
     return min(_points(day), key=lambda p: abs(p[4] - km))
 
 
+# --- Папраўка гадзінніка камеры (поле photo_clock у файле паходу) ----------------------
+
+_SHIFT_RE = re.compile(r"\s*([+-]?)\s*((?:[0-9]+\s*[dhm]\s*)+)")
+_SHIFT_UNITS = {"d": "days", "h": "hours", "m": "minutes"}
+
+
+def _clock_shift(value) -> timedelta | None:
+    """«-31d», «+1h», «-1d 2h 30m» → прамежак часу; None — запіс няправільны."""
+    m = _SHIFT_RE.fullmatch(value) if isinstance(value, str) else None
+    if not m:
+        return None
+    total = sum((timedelta(**{_SHIFT_UNITS[unit]: int(n)}) for n, unit in re.findall(r"([0-9]+)\s*([dhm])", m[2])), timedelta())
+    return -total if m[1] == "-" else total
+
+
+def photo_clock(slug: str, rules):
+    """Папраўка гадзінніка камеры: функцыя (імя файла, час з фота ISO) → сапраўдны час ISO.
+
+    Правілы з поля `photo_clock` файла паходу — спіс запісаў; для фота дзейнічае першы запіс, які яму падыходзіць:
+      date: 2025-11-25       — якія фота: з такой датай у камеры (неабавязкова);
+      files: "IMG_07*"       — і/або з такім імем, шаблон з * і ? або спіс шаблонаў (неабавязкова);
+      real_date: 2025-10-25  — на самай справе яны зробленыя ў гэты дзень (патрабуе date);
+      shift: "-1h"           — і/або перавесці гадзіннік: d — дні, h — гадзіны, m — хвіліны.
+    Няправільны запіс прапускаецца з папярэджаннем. Сам час у фота і ў кэшы не мяняецца.
+    """
+    def warn(message: str) -> None:
+        print(f"  ! {slug}: photo_clock: {message}")
+
+    found = []
+    if rules is not None and not isinstance(rules, list):
+        warn(f"чакаецца спіс запісаў, а не «{rules}»")
+        rules = None
+    for i, rule in enumerate(rules or [], 1):
+        what = f"запіс {i}"
+        if not isinstance(rule, dict):
+            warn(f"{what}: чакаюцца палі date, files, real_date, shift")
+            continue
+        unknown = set(rule) - {"date", "files", "real_date", "shift"}
+        if unknown:
+            warn(f"{what}: невядомыя палі: {', '.join(sorted(map(str, unknown)))}")
+        day = iso_date(rule["date"]) if rule.get("date") is not None else None
+        if rule.get("date") is not None and not day:
+            warn(f"{what}: няправільная дата date: {rule['date']}")
+            continue
+        files = rule.get("files")
+        patterns = [files] if isinstance(files, str) else files
+        if patterns is not None and (not isinstance(patterns, list) or not patterns
+                                     or not all(isinstance(p, str) and p.strip() for p in patterns)):
+            warn(f"{what}: files — шаблон імя або спіс шаблонаў, а не «{files}»")
+            continue
+        shift = timedelta()
+        if rule.get("real_date") is not None:
+            real = iso_date(rule["real_date"])
+            if not real or not day:
+                warn(f"{what}: real_date — сапраўдная дата для фота з датай date (патрэбны абедзве даты)")
+                continue
+            shift += date.fromisoformat(real) - date.fromisoformat(day)
+        if rule.get("shift") is not None:
+            extra = _clock_shift(rule["shift"])
+            if extra is None:
+                warn(f"{what}: shift — напрыклад \"-31d\", \"+1h\" або \"-1d 2h 30m\", а не «{rule['shift']}»")
+                continue
+            shift += extra
+        if rule.get("real_date") is None and rule.get("shift") is None:
+            warn(f"{what}: няма ні real_date, ні shift — папраўляць няма чым")
+            continue
+        found.append((day, [p.strip().lower() for p in patterns] if patterns else None, shift))
+
+    # подпіс правіл: месцы фота, палічаныя пры іншых правілах, з папярэдняга індэкса не бяруцца
+    key = hashlib.sha1(json.dumps([[day, patterns, shift.total_seconds()] for day, patterns, shift in found])
+                       .encode()).hexdigest()[:10] if found else None
+
+    def clock(name, taken):
+        if not taken or not found:
+            return taken
+        try:
+            moment = datetime.fromisoformat(taken)
+        except (TypeError, ValueError):
+            return taken
+        low = str(name).lower()
+        for day, patterns, shift in found:
+            if day and moment.date().isoformat() != day:
+                continue
+            if patterns and not any(fnmatchcase(low, p) or fnmatchcase(Path(low).stem, p) for p in patterns):
+                continue
+            return (moment + shift).isoformat()
+        return taken
+
+    clock.key = key
+    return clock
+
+
+def clock_manifest(manifest: dict, clock) -> dict:
+    """Маніфест фота з папраўленым часам здымкі (original — для месца на трэку, taken — для парадку).
+
+    Палі, якіх у запісе няма, не дадаюцца: запіс без original — са старога маніфеста, час яго яшчэ не прачытаны.
+    """
+    return {key: {**m, **{field: clock(key, m[field]) for field in ("original", "taken") if field in m}}
+            for key, m in manifest.items()}
+
+
 PHOTO_GPS_M = 300  # GPS фота далей за гэта ад трэку — не месца на маршруце (стары або памылковы адбітак, фота з дому)
 
 
 def photo_places(photos: list, manifest: dict, days: list[dict]) -> list:
     """Месца здымкі кожнага апублікаванага фота (у тым жа парадку) або None, калі яно невядомае.
 
-    Калі ў фота ёсць GPS каля трэку, месца — сам пункт GPS (кіламетр і вышыня — ад бліжэйшага месца трэку).
-    Інакш — месца на трэку ў момант здымкі паводле часу з EXIF. Фота без часу і GPS, зробленыя да старту,
-    пасля фінішу або з няправільнай датай у камеры застаюцца без месца: яно не выдумляецца.
+    Калі ў фота ёсць GPS каля трэку, месца — сам пункт GPS (кіламетр і вышыня — ад месца трэку побач; калі трэк
+    праходзіць там некалькі разоў — ад праходкі, бліжэйшай па часе да здымкі). Інакш — месца на трэку ў момант
+    здымкі паводле часу з EXIF, і толькі ў межах запісу тура: дзе аўтар быў за дваццаць хвілін да старту,
+    невядома. Фота без часу і GPS або з няправільнай датай у камеры застаюцца без месца: яно не выдумляецца.
     """
     by_name = {m.get("name"): m for m in manifest.values() if isinstance(m, dict)}
     return [_photo_place(by_name.get(photo_name(p)) or {}, days) for p in photos]
+
+
+def photo_places_key(days: list[dict], clock_key: str | None) -> str:
+    """Подпіс таго, ад чаго залежаць месцы фота апрача саміх фота: «<трэк>.<папраўка гадзінніка>».
+
+    Трэк — усе пункты ўсіх тураў (каардынаты, вышыня, час, кіламетр), падзел на дні і туры і часавы пояс: месца
+    фота залежыць ад кожнага з іх. Файл трэку на сайце для гэтага не падыходзіць: у ім няма часу.
+    """
+    track = [[day["tz"].utcoffset(None).total_seconds(), day["segs"]] for day in days]
+    return f"{hashlib.sha1(json.dumps(track).encode()).hexdigest()[:10]}.{clock_key or '-'}"
+
+
+def photo_clock_kept(places_key, clock_key: str | None) -> bool:
+    """Ці палічаны ранейшыя месцы фота з той жа папраўкай гадзінніка — для паходу, трэк якога застаўся ранейшы
+    (тура няма ў кэшы, і параўнаць сам трэк няма з чым). Індэкс без подпісу — месцы палічаны без папраўкі."""
+    if not isinstance(places_key, str):
+        return clock_key is None
+    return places_key.rpartition(".")[2] == (clock_key or "-")
 
 
 def _photo_place(entry: dict, days: list[dict]) -> dict | None:
@@ -627,13 +830,16 @@ def _photo_place(entry: dict, days: list[dict]) -> dict | None:
             ts = datetime.fromisoformat(entry["original"]).replace(tzinfo=tz).timestamp()
         except (TypeError, ValueError):
             ts = None
-    pos = by_time = _by_time(days, ts) if ts is not None else None
+    pos = _by_time(days, ts, tolerance=0) if ts is not None else None  # без допуску: гэта не ручны запіс
     gps = entry.get("gps")  # [даўгата, шырата]
     point = lat_lng([gps[1], gps[0]]) if isinstance(gps, (list, tuple)) and len(gps) == 2 else None
     if point:
-        # дзень вядомы з часу здымкі: на маршруце «туды і назад» пункт GPS блізкі да трэку двойчы
-        found = _project(point[0], point[1], days, by_time["day"] if by_time else None)
-        if found and found[0] <= PHOTO_GPS_M:
+        if ts is not None:
+            found = _project_at_time(point[0], point[1], days, ts, PHOTO_GPS_M)
+        else:
+            found = _project(point[0], point[1], days)
+            found = found if found and found[0] <= PHOTO_GPS_M else None
+        if found:
             pos = _position(days, found[1], found[2], found[0])
             pos["at"] = [round(point[1], 5), round(point[0], 5)]
     if pos is None:
@@ -652,9 +858,9 @@ def _position(days: list[dict], di: int, point: tuple, off: float | None = None)
     return pos
 
 
-def _by_time(days: list[dict], ts: float, only_day: int | None = None) -> dict | None:
+def _by_time(days: list[dict], ts: float, only_day: int | None = None, tolerance: float = PHOTO_TOLERANCE_S) -> dict | None:
     """Месца на трэку ў момант `ts`. Кожны адрэзак (тур) дня разглядаецца асобна: момант у доўгім
-    перапынку паміж турамі не мае месца на трэку — дапускаецца толькі PHOTO_TOLERANCE_S ад межаў запісу.
+    перапынку паміж турамі не мае месца на трэку — дапускаецца толькі `tolerance` секунд ад межаў запісу.
 
     Унутры тура месца, вышыня і кіламетр бяруцца па прамой паміж суседнімі па часе пунктамі (трэк можа быць
     разрэджаны), час — сам шуканы момант. Момант каля мяжы запісу — яе крайні пункт.
@@ -665,7 +871,7 @@ def _by_time(days: list[dict], ts: float, only_day: int | None = None) -> dict |
             continue
         for seg in day["segs"]:
             pts = [p for p in seg if p[3] is not None]
-            if not pts or not pts[0][3] - PHOTO_TOLERANCE_S <= ts <= pts[-1][3] + PHOTO_TOLERANCE_S:
+            if not pts or not pts[0][3] - tolerance <= ts <= pts[-1][3] + tolerance:
                 continue
             times = [p[3] for p in pts]
             if ts <= times[0] or ts >= times[-1]:
@@ -871,12 +1077,15 @@ def _amount(value, n_days: int, what: str, warn) -> tuple[list | None, float | N
 
 def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n_days: int, end: str, manifest: dict,
                     photos: list, prev: dict | None, home=None, prev_photos: list | None = None,
-                    rates: dict | None = None, start: str = "", track_kept: bool = False) -> tuple[dict | None, str | None]:
+                    rates: dict | None = None, start: str = "", track_kept: bool = False,
+                    photo_places_fresh: bool = True) -> tuple[dict | None, str | None]:
     """Блок `practical:` → (звесткі аўтара для індэкса або None, ручное выпраўленне тыпу маршруту або None).
 
     Няправільнае поле прапускаецца з папярэджаннем і не спыняе зборку.
     track_kept — пунктаў трэку няма (тура няма ў кэшы), але на сайце застаецца ранейшы трэк: месцы запісаў
     бяруцца з папярэдняга індэкса. Калі трэку ў паходу больш няма, няма і месцаў на ім.
+    photo_places_fresh — ранейшыя месцы па фота палічаны з цяперашнімі трэкам і папраўкай гадзінніка (подпіс
+    photoKey супаў). Інакш ранейшае месца запісу з `photo:` састарэла і з папярэдняга індэкса не бярэцца.
     """
     if block is None:
         return None, None
@@ -929,10 +1138,14 @@ def parse_practical(slug: str, block, *, days: list[dict], stats: dict | None, n
         lost = named and key is None and not kept  # фота сапраўды няма або імя неадназначнае
         by_photo = (item["ref"] or "").startswith("photo:")
         waiting = by_photo and (key in unread or kept)
+        no_source = (not days and track_kept) or (waiting and has_track)  # пералічыць месца няма з чаго
         if by_photo and lost:
             pos, problem = None, photo_problem(spec["photo"], candidates)  # ні фота, ні месца
-        elif was_pos and ((not days and track_kept) or (waiting and has_track)):
-            pos, problem = was_pos, None  # крыніцы для разліку няма: месца з папярэдняга індэкса
+        elif was_pos and no_source and (photo_places_fresh or not by_photo):
+            pos, problem = was_pos, None  # месца з папярэдняга індэкса
+        elif was_pos and no_source:
+            pos, problem = None, (f"ранейшае месца па фота {spec['photo']} састарэла (змяніўся трэк або папраўка "
+                                  "гадзінніка), а пералічыць яго няма з чаго — падключыце дыск з фота і спампуйце туры")
         elif waiting and has_track:
             pos, problem = None, f"час здымкі фота {spec['photo']} яшчэ не прачытаны (тэчка з фота недаступная)"
         else:

@@ -12,6 +12,10 @@ komoot_sports: [hike, mountaineering]
 
 youtube_channel: "https://www.youtube.com/@vlog_belarusa"
 
+# Адрас апублікаванага сайта. Патрэбны для спасылак, якімі дзеляцца: старонкі <мова>/<паход>/ паказваюць
+# у Telegram і іншых праграмах назву, лічбы і вокладку паходу. Без адраса такія старонкі не ствараюцца.
+site_url: "https://filippovichsergey.github.io/my-hiking/"
+
 # Адкуль звычайна пачынаецца дарога да паходу: падстаўляецца ў «Як дабрацца», калі `from` не пазначана.
 home:
   name:

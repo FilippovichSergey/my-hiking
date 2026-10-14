@@ -49,6 +49,7 @@ const PRACTICAL = {
 };
 const DATA = {
   version: "9.8.7",
+  share: true, // ёсць старонкі <мова>/<паход>/ з прэв'ю для спасылак
   hikes: [
     hike("slow", { be: "Аджарыя", en: "Adjara" }),
     hike("guria", { be: "Гурыя", en: "Guria" }, { difficulty: "expert", stats: stats(5, 900), facts: FACTS, practical: PRACTICAL }),
@@ -66,8 +67,11 @@ const TRACK = { days: [{ segs: [[[42, 41, 1000, 0], [42.1, 41.1, 1100, 1]]] }] }
 
 // fetch: hikes.json адразу, трэкі «slow» і «late» — па камандзе тэста, «broken» — 404.
 let releaseSlow, releaseLate;
+const fetched = []; // усе запытаныя адрасы
 function fakeFetch(url) {
   const json = (data) => Promise.resolve({ ok: true, json: () => Promise.resolve(data) });
+  fetched.push(url);
+  url = url.split("?")[0]; // адрас даных у index.html — з версіяй (яе ставіць `hike build`)
   if (url.endsWith("data/hikes.json")) return json(DATA);
   if (url.endsWith("slow.json")) return new Promise((resolve) => { releaseSlow = () => resolve({ ok: true, json: () => Promise.resolve(TRACK) }); });
   if (url.endsWith("late.json")) return new Promise((resolve) => { releaseLate = () => resolve({ ok: true, json: () => Promise.resolve(TRACK) }); });
@@ -336,12 +340,12 @@ test("старонка паходу: «Спампаваць GPX» і «Падз�
     const share = button("Падзяліцца");
     share.click();
     await waitFor(() => share.textContent === "Спасылка скапіявана", "паведамленне пра капіяванне");
-    assert.deepEqual(copied, ["http://localhost/#/be/guria"]);
+    assert.deepEqual(copied, ["http://localhost/be/guria/"], "спасылка, якой дзеляцца, — старонка з прэв'ю");
     // буфер абмену недаступны — спасылка паказваецца для ручнога капіявання
     clipboard(async () => { throw new Error("denied"); });
     share.click();
     await waitFor(() => prompts.length === 1, "запасны спосаб");
-    assert.deepEqual(prompts, ["http://localhost/#/be/guria"]);
+    assert.deepEqual(prompts, ["http://localhost/be/guria/"]);
 
     // выбраны дзень шматдзённага паходу: файл толькі з гэтым днём; для дня без трэку кнопкі няма
     await go("#/be/mismatch");
@@ -682,7 +686,7 @@ test("руская мова: пераключальнік, адрас #/ru, тэ
     Object.defineProperty(window.navigator, "clipboard", { value: { writeText: async (text) => { copied = text; } }, configurable: true });
     [...panel().querySelectorAll(".actions .link-btn")].at(-1).click();
     await tick();
-    assert.equal(copied, "http://localhost/#/ru/guria");
+    assert.equal(copied, "http://localhost/ru/guria/");
     await go("#/de/guria");
     assert.equal(document.documentElement.lang, "ru");
     assert.ok(panel().querySelector(".hike-list"), "невядомы адрас — спіс паходаў");
@@ -768,4 +772,10 @@ test("значкі фота на карце адкрытага паходу", as
   } finally {
     guria.photos = [];
   }
+});
+
+test("даныя паходаў бяруцца па адрасе з версіяй з index.html", () => {
+  const meta = document.querySelector('meta[name="hikes-data"]');
+  assert.match(meta.content, /^data\/hikes\.json\?v=[0-9a-f]{10}$/, "версію даных запісвае `hike build`");
+  assert.equal(fetched[0], meta.content);
 });

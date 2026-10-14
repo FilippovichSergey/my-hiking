@@ -19,6 +19,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+import pages
 import practical
 from common import (CACHE, CONTENT, DOCS, has_track, iso_date, lat_lng, load_config, photo_name, read_version, load_yaml, read_json, site_photos_dir, slugify,
                     text_pair, tour_local_datetime, write_json)
@@ -274,11 +275,12 @@ def _published_entry(out_dir: Path, key: str, old_manifest: dict, run_used: set,
 
 
 def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, force: bool,
-                 pending: list | None = None, prev: dict | None = None):
+                 pending: list | None = None, prev: dict | None = None, clock=None):
     """Вяртае (photos, cover_index, gps_першага_фота_з_GPS).
 
     Састарэлыя файлы дадаюцца ў `pending` (main выдаляе іх толькі пасля запісу новага індэкса);
     без `pending` яны выдаляюцца адразу. `prev` — запіс паходу з папярэдняга hikes.json.
+    `clock` — папраўка гадзінніка камеры (practical.photo_clock): па ёй фота ставяцца ў парадку здымкі.
     """
     obsolete = [] if pending is None else pending
     out_dir = DOCS / "photos" / slug
@@ -357,6 +359,8 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
         obsolete += [f for f in out_dir.iterdir() if f.name not in keep_files]
     if pending is None:
         _remove(obsolete)
+    if clock:  # парадак у галерэі — па сапраўдным часе здымкі; у маніфесце застаецца час з фота
+        entries = [(clock(key, taken), key, m) for taken, key, m in entries]
     order = {n: i for i, n in enumerate(prev_names)}
     if any(m.get("restored") for *_, m in entries):
         # Без маніфеста час здымкі і GPS адноўленых фота невядомыя: фота з папярэдняга індэкса застаюцца
@@ -366,10 +370,11 @@ def build_photos(slug: str, src_dir: Path | None, cover: str | None, cfg: dict, 
         fresh = sorted((e for e in entries if e[2]["name"] not in order), key=lambda e: (e[0] or "", e[1]))
         entries = known + fresh
         photos, cover_idx, gps = photo_list(slug, entries, cover, keep_order=True)
-        if cover_idx is None:  # ранейшая вокладка — па імені файла, а не па нумары ў старым спісе
+        if cover_idx is None and cover:  # зададзеная вокладка не знойдзена: ранейшая — па імені файла, а не па нумары
             old = (prev.get("photos") or [])[prev.get("cover") or 0:][:1]
             srcs = [p["src"] for p in photos]
             cover_idx = srcs.index(old[0]["src"]) if old and old[0]["src"] in srcs else 0
+        cover_idx = cover_idx or 0  # без поля cover — першае фота
         # Ранейшы пункт (ён браўся з GPS аднаго з ранейшых фота) важнейшы за GPS новага фота.
         gps = (prev.get("point") if not prev.get("lines") else None) or gps
         return _usable_photos(slug, photos), cover_idx, gps
@@ -406,8 +411,9 @@ def _cover_matches_name(cover, name: str) -> bool:
 def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
     """Фота, ужо апублікаваныя ў docs/photos/<slug> — калі крыніца недаступная, сайт іх не губляе.
 
-    Парадак, вокладка і пункт на карце бяруцца з папярэдняга hikes.json; калі яго няма —
-    з маніфеста фота; калі няма і маніфеста — з саміх файлаў WebP.
+    Парадак, зададзеная вокладка і пункт на карце бяруцца з папярэдняга hikes.json; калі яго няма —
+    з маніфеста фота; калі няма і маніфеста — з саміх файлаў WebP. Без поля `cover` вокладка — першае фота,
+    як і пры даступнай крыніцы: ранейшая вокладка магла быць зададзенай, а поле з таго часу прыбралі.
     """
     prev_photos = (prev or {}).get("photos") or []
     usable = [(i, q) for i, q in ((i, _usable_photo(p)) for i, p in enumerate(prev_photos)) if q]
@@ -422,16 +428,21 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
                              "няма мініяцюр ({}) — замест іх паказваюцца поўныя фота")):
             if count:
                 print(f"  ! {slug}: {text.format(count)}")
-        names = [Path(prev_photos[i]["src"]).stem for i, _ in usable]  # імёны ранейшых поўных фота
+        manifest = read_manifest(slug)
+        # Імёны ранейшых фота. Калі поўная копія страчана, у індэксе замест яе мініяцюра `x-t.webp`: імя фота — `x`.
+        # Гэтак жа выглядае фота, якое само завецца `x-t` і засталося без мініяцюры, — яго імя ёсць у маніфесце.
+        known = {m.get("name") for m in manifest.values()}
+        names = [stem if (stem := Path(prev_photos[i]["src"]).stem) in known else photo_name(prev_photos[i]) for i, _ in usable]
         # ранейшая вокладка — па месцы ў ранейшым спісе, а не па нумары ў новым
         prev_cover = next((n for n, (i, _) in enumerate(usable) if i == (prev.get("cover") or 0)), None)
-        manifest = read_manifest(slug)
         exact = [names.index(m["name"]) for key, m in manifest.items() if cover and m.get("name") in names
                  and str(cover).lower() in (key.lower(), Path(key).stem.lower())]
         match = [i for i, n in enumerate(names) if cover and _cover_matches_name(cover, n)]
         # Дакладнае імя з маніфеста; без яго — ранейшая вокладка, калі яна адпавядае `cover` (адзін slug
         # можа быць у некалькіх фота); інакш першае супадзенне.
-        if exact:
+        if not cover:
+            cover_idx = 0
+        elif exact:
             cover_idx = exact[0]
         elif prev_cover is not None and (not match or prev_cover in match):
             cover_idx = prev_cover
@@ -450,6 +461,20 @@ def previous_photos(slug: str, cover: str | None, prev: dict | None = None):
                 entries.append(("", f.stem, {"name": f.stem, "w": im.width, "h": im.height}))
     photos, cover_idx, gps = photo_list(slug, entries, cover)
     return _usable_photos(slug, photos), cover_idx or 0, gps
+
+
+def _by_shooting_time(photos: list, cover_idx: int, manifest: dict, cover) -> tuple[list, int]:
+    """Фота з папярэдняга індэкса — у парадку здымкі паводле маніфеста, як пры даступных арыгіналах.
+
+    Для парадку арыгіналы не патрэбныя: час здымкі (ужо з папраўкай гадзінніка) ёсць у маніфесце. Калі хоць
+    пра адно фота ў маніфесце нічога няма, парадак застаецца ранейшы. Зададзеная вокладка застаецца тым жа
+    фота; без зададзенай вокладкай становіцца першае фота па часе.
+    """
+    known = {m.get("name"): (m.get("taken") or "", key) for key, m in manifest.items()}
+    if not photos or any(photo_name(p) not in known for p in photos):
+        return photos, cover_idx
+    order = sorted(range(len(photos)), key=lambda i: known[photo_name(photos[i])])
+    return [photos[i] for i in order], order.index(cover_idx) if cover else 0
 
 
 def read_manifest(slug: str) -> dict:
@@ -636,25 +661,47 @@ def main(argv=None) -> None:
             raise SystemExit(f"! {slug}: няма сапраўднай даты паходу (поле date) і трэку з датай. "
                              f"Выпраўце {slug}.yaml і запусціце зноў — індэкс сайта не змяняўся.")
 
+        clock = practical.photo_clock(slug, h.get("photo_clock"))  # калі ў камеры стаялі не тая дата або час
         folder = h.get("photos_folder")
         if folder and not (photos_available and (photos_root / folder).is_dir()):
             if photos_available:
                 print(f"  ! {slug}: тэчка {folder} не знойдзена — застаюцца апублікаваныя раней фота")
             photos, cover_idx, photo_gps = previous_photos(slug, h.get("cover"), prev)
+            restored = True
         else:
             src_dir = site_photos_dir(photos_root / folder, cfg) if folder else None
             photos, cover_idx, photo_gps = build_photos(slug, src_dir, h.get("cover"), cfg, args.force, pending,
-                                                        prev)
+                                                        prev, clock)
+            restored = False
+        manifest = practical.clock_manifest(read_manifest(slug), clock)  # час здымкі — ужо з папраўкай
+        if restored:
+            photos, cover_idx = _by_shooting_time(photos, cover_idx, manifest, h.get("cover"))
 
         # Месца здымкі кожнага фота — для значкоў на карце. Яно лічыцца па трэку; калі тура няма ў кэшы
         # і на сайце застаецца ранейшы трэк — застаюцца і ранейшыя месцы; без трэку месцаў няма.
+        # places_fresh: ранейшыя месцы палічаны з цяперашнімі трэкам і папраўкай гадзінніка — толькі тады яны
+        # бяруцца з папярэдняга індэкса (і для значкоў фота, і для запісаў практычнай часткі з `photo:`).
         if raw:
-            places = practical.photo_places(photos, read_manifest(slug), raw)
+            places = practical.photo_places(photos, manifest, raw)
+            places_key = practical.photo_places_key(raw, clock.key)
+            places_fresh = bool(prev) and prev.get("photoKey") == places_key
+            # Пра фота, якога няма ў маніфесце (кэш не захоўваецца ў Git, а арыгіналы недаступныя), невядома
+            # нічога — гэта не «месца няма». Яго ранейшае месца застаецца, пакуль трэк і папраўка гадзінніка тыя ж.
+            if places_fresh:
+                known = {m.get("name") for m in manifest.values()}
+                was = {photo_name(p): p.get("pos") for p in prev.get("photos") or []}
+                places = [pos if photo_name(p) in known else was.get(photo_name(p)) for p, pos in zip(photos, places)]
         elif kept_track:
-            was = {photo_name(p): p.get("pos") for p in (prev or {}).get("photos") or []}
+            # Трэк ранейшы, пералічыць месцы няма па чым: яны застаюцца, пакуль папраўка гадзінніка тая ж.
+            places_fresh = practical.photo_clock_kept((prev or {}).get("photoKey"), clock.key)
+            was = {photo_name(p): p.get("pos") for p in (prev or {}).get("photos") or []} if places_fresh else {}
             places = [was.get(photo_name(p)) for p in photos]
+            places_key = (prev or {}).get("photoKey") if places_fresh else None  # разлік ранейшы — і подпіс ранейшы
+            if not places_fresh and any(p.get("pos") for p in (prev or {}).get("photos") or []):
+                print(f"  ! {slug}: папраўка гадзінніка змянілася, а тураў у кэшы няма — месцы фота на карце прыбраны "
+                      f"(запусціце `hike komoot`)")
         else:
-            places = [None] * len(photos)
+            places, places_key, places_fresh = [None] * len(photos), None, False
         photos = [{**{k: v for k, v in p.items() if k != "pos"}, **({"pos": pos} if pos else {})} for p, pos in zip(photos, places)]
 
         point, bbox = None, None
@@ -681,9 +728,9 @@ def main(argv=None) -> None:
         # Звесткі аўтара; ручное выпраўленне тыпу маршруту важнейшае за разлік.
         notes, type_override = practical.parse_practical(
             slug, h.get("practical"), days=raw, stats=stats, n_days=len(days) or calendar_days(start, end), end=end,
-            manifest=read_manifest(slug), photos=photos, prev=(prev or {}).get("practical"),
+            manifest=manifest, photos=photos, prev=(prev or {}).get("practical"),
             home=(cfg.get("home") or {}).get("name"), prev_photos=(prev or {}).get("photos"),
-            rates=usd_rates, start=start, track_kept=kept_track)
+            rates=usd_rates, start=start, track_kept=kept_track, photo_places_fresh=places_fresh)
         # Падказкі з OpenStreetMap і дарога на машыне — з таго, што спампаваў `hike fetch`, і толькі калі яны
         # адносяцца да гэтага трэку. Апублікаваныя раней застаюцца толькі разам з ранейшым трэкам (тура няма
         # ў кэшы); калі трэку ў паходу больш няма, няма і звестак, якія ад яго залежаць.
@@ -695,8 +742,8 @@ def main(argv=None) -> None:
             wanted = practical.drive_targets(raw) if practical.home_point(cfg.get("home")) else {}
             if not fresh or any(name not in (drive or {}) for name in wanted):
                 no_services.add(slug)
-        elif kept_track:
-            hints, drive = (prev or {}).get("hints") or [], (prev or {}).get("drive")
+        elif kept_track:  # падказкі ранейшыя, але без тых, што аўтар з таго часу пазначыў сам
+            hints, drive = practical.kept_hints((prev or {}).get("hints") or [], notes), (prev or {}).get("drive")
         else:
             hints, drive = [], None
         if type_override:  # разлічаны тып застаецца ў typeCalc: выпраўленне можна будзе зняць і без кэша тураў
@@ -725,6 +772,7 @@ def main(argv=None) -> None:
             "track": track,
             "cover": cover_idx if photos else None,
             "photos": photos,
+            **({"photoKey": places_key} if photos and places_key else {}),  # подпіс трэку і photo_clock для месцаў фота
             "videos": videos,
             "impressions": text_pair(h.get("impressions")),
         })
@@ -735,9 +783,14 @@ def main(argv=None) -> None:
     pending += [f for f in (DOCS / "data" / "tracks").glob("*.json") if f.name not in referenced]
 
     hikes.sort(key=lambda h: h["date"], reverse=True)
+    # Старонкі <мова>/<паход>/ з прэв'ю для спасылак: патрэбны адрас сайта (site_url у config.yaml).
+    site, stale = pages.share_pages(DOCS, hikes, cfg.get("site_url"))
+    pending += stale
     write_json(DOCS / "data" / "hikes.json",
                {"generated": datetime.now(timezone.utc).isoformat(timespec="seconds"), "version": read_version(),
-                "hikes": hikes}, compact=True)
+                "share": bool(site), "hikes": hikes}, compact=True)
+    # Версіі файлаў у index.html: пасля публікацыі браўзер бярэ ўсе файлы сайта аднаго выпуску.
+    pages.stamp_index(DOCS, site)
     # Новы індэкс запісаны — цяпер можна прыбраць файлы, на якія ён ужо не спасылаецца.
     _remove(pending)
     (DOCS / ".nojekyll").touch()
